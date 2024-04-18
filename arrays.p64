@@ -8,15 +8,18 @@ def store(array, ofs, value):
 
 def print_num(n):
     if n == 0:
-        putc(48)  # '0'
+        putchar(48)  # '0'
         return
     if n < 0:
-        putc(45)  # '-' sign
+        putchar(45)  # '-' sign
         n = -n
     div = n // 10
     if div != 0:
         print_num(div)
-    putc(48 + n % 10)
+    putchar(48 + n % 10)
+
+def newline():
+    putchar(10)
 
 def main():
     size = 100
@@ -27,3 +30,4 @@ def main():
     for i in range(size):
         sum = sum + fetch(a, i)
     print_num(sum)
+    newline()

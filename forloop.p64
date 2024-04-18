@@ -2,7 +2,8 @@
 
 def loop():
     for i in range(10):
-        putc(65 + i)
+        putchar(65 + i)
 
 def main():
     loop()
+    puts(r'\ndone\n')
