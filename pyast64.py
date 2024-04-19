@@ -162,6 +162,8 @@ class Compiler:
             assembler = Assembler(peephole=peephole)
         self.asm = assembler
         self.func = None
+        self.local_func = []
+        self.local_str = []
 
     def compile(self, node):
         self.header()
@@ -178,24 +180,16 @@ class Compiler:
         visit_func(node)
 
     def header(self):
-        self.asm.directive('.section __TEXT, __text')
+        self.asm.directive('.section .text')
         self.asm.comment('')
 
     def footer(self):
-        self.compile_putc()
+        if self.local_str:
+            self.asm.directive('.section .data')
+        for i in range(len(self.local_str)):
+            self.asm.label('str'+str(i))
+            self.asm.directive('.asciz \"'+self.local_str[i]+'\"')
         self.asm.flush()
-
-    def compile_putc(self):
-        # Insert this into every program so it can call putc() for output
-        self.asm.label('putc')
-        self.compile_enter()
-        self.asm.instr('movl', '$0x2000004', '%eax')    # write
-        self.asm.instr('movl', '$1', '%edi')            # stdout
-        self.asm.instr('movq', '%rbp', '%rsi')          # address
-        self.asm.instr('addq', '$16', '%rsi')
-        self.asm.instr('movq', '$1', '%rdx')            # length
-        self.asm.instr('syscall')
-        self.compile_return(has_arrays=False)
 
     def visit_Module(self, node):
         for statement in node.body:
@@ -224,10 +218,11 @@ class Compiler:
 
         # Function label and header
         if node.name == 'main':
-            self.asm.directive('.globl _main')
-            self.asm.label('_main')
+            self.asm.directive('.globl main')
+            self.asm.label('main')
         else:
             self.asm.label(node.name)
+            self.local_func.append(node.name)
         self.num_extra_locals = len(self.locals) - len(node.args.args)
         self.compile_enter(self.num_extra_locals)
 
@@ -237,11 +232,10 @@ class Compiler:
 
         if not isinstance(node.body[-1], ast.Return):
             # Function didn't have explicit return at the end,
-            # compile return now (or exit for "main")
+            # compile return now (or exit with 0 for "main")
             if self.func == 'main':
-                self.compile_exit(0)
-            else:
-                self.compile_return(self.num_extra_locals)
+                self.asm.instr('movq', '$0', '%rax')
+            self.compile_return(self.num_extra_locals)
 
         self.asm.comment('')
         self.func = None
@@ -267,27 +261,21 @@ class Compiler:
                     num_extra_locals * 8))
         self.asm.instr('ret')
 
-    def compile_exit(self, return_code):
-        if return_code is None:
-            self.asm.instr('popq', '%rdi')
-        else:
-            self.asm.instr('movl', '${}'.format(return_code), '%edi')
-        self.asm.instr('movl', '$0x2000001', '%eax')
-        self.asm.instr('syscall')
-
     def visit_Return(self, node):
         if node.value:
             self.visit(node.value)
-        if self.func == 'main':
-            # Returning from main, exit with that return code
-            self.compile_exit(None if node.value else 0)
-        else:
-            if node.value:
-                self.asm.instr('popq', '%rax')
-            self.compile_return(self.num_extra_locals)
+            self.asm.instr('popq', '%rax')
+        if self.func == 'main' and not node.value:
+            self.asm.instr('movq', '$0', '%rax')
+        self.compile_return(self.num_extra_locals)
 
-    def visit_Num(self, node):
-        self.asm.instr('pushq', '${}'.format(node.n))
+    def visit_Constant(self, node):
+        if isinstance(node.value, int):
+            self.asm.instr('pushq', '${}'.format(node.n))
+        elif isinstance(node.value, str):
+            if not node.value in self.local_str:
+                self.local_str.append(node.value)
+            self.asm.instr('pushq', '$str'+str(self.local_str.index(node.value)))
 
     def local_offset(self, name):
         index = self.locals[name]
@@ -306,7 +294,7 @@ class Compiler:
         target = node.targets[0]
         if isinstance(target, ast.Subscript):
             # array[offset] = value
-            self.visit(target.slice.value)
+            self.visit(target.slice)
             self.asm.instr('popq', '%rax')
             self.asm.instr('popq', '%rbx')
             local_offset = self.local_offset(target.value.id)
@@ -413,8 +401,14 @@ class Compiler:
         else:
             for arg in node.args:
                 self.visit(arg)
+            if not node.func.id in self.local_func:
+                assert len(node.args) < 7, \
+                    'can only call C lib funcs with 6 or less args'
+                for idx in range(len(node.args), 0, -1):
+                    self.asm.instr('popq', \
+                        "%r"+["di","si","dx","cx","8","9"][idx-1])
             self.asm.instr('call', node.func.id)
-            if node.args:
+            if node.func.id in self.local_func and node.args:
                 # Caller cleans up the arguments from the stack
                 self.asm.instr('addq', '${}'.format(8 * len(node.args)), '%rsp')
             # Return value is in rax, so push it on the stack now
@@ -543,7 +537,7 @@ class Compiler:
         pass
 
     def visit_Subscript(self, node):
-        self.visit(node.slice.value)
+        self.visit(node.slice)
         self.asm.instr('popq', '%rax')
         local_offset = self.local_offset(node.value.id)
         self.asm.instr('movq', '{}(%rbp)'.format(local_offset), '%rdx')
