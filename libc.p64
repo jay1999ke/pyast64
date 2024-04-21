@@ -1,0 +1,5 @@
+def main():
+   fp = fopen('myfile', 'w')
+   fputs(r'hello world!\n', fp)
+   fclose(fp)
+   exit(-1)
