@@ -1,5 +1,9 @@
 def main():
+   num = 0
+   puts('Enter a number: ')
+   scanf('%d', adr(num))
+   printf(r'hello world (%d)!\n', num)
+
    fp = fopen('myfile', 'w')
-   fputs(r'hello world!\n', fp)
+   fprintf(fp, r'hello world (%d)!\n', num)
    fclose(fp)
-   exit(-1)

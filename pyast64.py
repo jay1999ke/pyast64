@@ -417,7 +417,8 @@ class Compiler:
                 for idx in range(len(node.args), 0, -1):
                     self.asm.instr('popq', \
                         "%r"+["di","si","dx","cx","8","9"][idx-1])
-                if (node.func.id == 'scanf') or (node.func.id == 'printf'):
+                # stack align to 16 bytes for certain libc functions
+                if (node.func.id.endswith('scanf')) or (node.func.id.endswith('printf')):
                     self.asm.instr('test', '$8', '%rsp')
                     label = self.label('skip_push')
                     self.asm.instr('je', label)
@@ -425,7 +426,8 @@ class Compiler:
                     self.asm.label(label)
             self.asm.instr('call', node.func.id)
             if not node.func.id in self.local_func:
-                if (node.func.id == 'scanf') or (node.func.id == 'printf'):
+                # libc stack alignment cleanup
+                if (node.func.id.endswith('scanf')) or (node.func.id.endswith('printf')):
                     self.asm.instr('mov', '0(%rsp)', '%rdx')
                     self.asm.instr('sub', '$8', '%rdx')
                     self.asm.instr('cmp', '%rdx', '%rsp')
