@@ -58,7 +58,7 @@ class Assembler:
                 pop_arg = optimized[mid + i][1][0]
                 push_arg = optimized[mid - i - 1][1][0]
                 if push_arg != pop_arg:
-                    moves.append(('movq', [push_arg, pop_arg]))
+                    moves.append(('movq', (push_arg, pop_arg)))
             optimized[mid - num:mid + num] = moves
 
         # This loop actually finds the sequences
@@ -262,8 +262,7 @@ class Compiler:
             self.asm.instr('addq', '%rbx', '%rsp')
         self.asm.instr('popq', '%rbp')
         if num_extra_locals > 0:
-            self.asm.instr('leaq', '{}(%rsp),%rsp'.format(
-                    num_extra_locals * 8))
+            self.asm.instr('leaq', '{}(%rsp)'.format( num_extra_locals * 8), '%rsp')
         self.asm.instr('ret')
 
     def visit_Return(self, node):
@@ -281,6 +280,8 @@ class Compiler:
             if not node.value in self.local_str:
                 self.local_str.append(node.value)
             self.asm.instr('pushq', '$str'+str(self.local_str.index(node.value)))
+        else:
+           assert False, 'only int and string constants supported'
 
     def local_offset(self, name):
         index = self.locals[name]
