@@ -105,6 +105,11 @@ class Assembler:
     def instr(self, opcode, *args):
         self.batch.append((opcode, args))
 
+    def patch_adr(self):
+        # change pushed value into a pushed address
+        self.batch[-1] = ('leaq', self.batch[-1][1] + ('%rax',))
+        self.instr('pushq', '%rax')
+
     def label(self, name):
         self.flush()
         print('{}:'.format(name), file=self.output_file)
@@ -398,6 +403,11 @@ class Compiler:
         builtin = getattr(self, 'builtin_{}'.format(node.func.id), None)
         if builtin is not None:
             builtin(node.args)
+        elif node.func.id == 'adr':
+            assert len(node.args) == 1 and isinstance(node.args[0], ast.Name),\
+                'adr() must have one argument'
+            self.visit(node.args[0])
+            self.asm.patch_adr()
         else:
             for arg in node.args:
                 self.visit(arg)
@@ -407,7 +417,22 @@ class Compiler:
                 for idx in range(len(node.args), 0, -1):
                     self.asm.instr('popq', \
                         "%r"+["di","si","dx","cx","8","9"][idx-1])
+                if (node.func.id == 'scanf') or (node.func.id == 'printf'):
+                    self.asm.instr('test', '$8', '%rsp')
+                    label = self.label('skip_push')
+                    self.asm.instr('je', label)
+                    self.asm.instr('pushq', '%rsp')
+                    self.asm.label(label)
             self.asm.instr('call', node.func.id)
+            if not node.func.id in self.local_func:
+                if (node.func.id == 'scanf') or (node.func.id == 'printf'):
+                    self.asm.instr('mov', '0(%rsp)', '%rdx')
+                    self.asm.instr('sub', '$8', '%rdx')
+                    self.asm.instr('cmp', '%rdx', '%rsp')
+                    label = self.label('skip_pop')
+                    self.asm.instr('jne', label)
+                    self.asm.instr('popq', '%rdx')
+                    self.asm.label(label)
             if node.func.id in self.local_func and node.args:
                 # Caller cleans up the arguments from the stack
                 self.asm.instr('addq', '${}'.format(8 * len(node.args)), '%rsp')
