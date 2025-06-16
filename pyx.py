@@ -248,7 +248,8 @@ class Context(object):
         self.libc_labels: Dict[str, Label] = {
             "printf": Label("printf"),
             "putchar": Label("putchar"),
-            "puts": Label("puts")
+            "puts": Label("puts"),
+            "print": Label("printf"), # Make it pretty for python 3 linters, code-formatters
         }
 
         # Maps local variable names to their index (stack slot)
