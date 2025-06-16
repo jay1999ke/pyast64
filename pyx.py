@@ -247,7 +247,8 @@ class Context(object):
         self.labels: Dict[str, Label] = {}
         self.libc_labels: Dict[str, Label] = {
             "printf": Label("printf"),
-            "putchar": Label("putchar")
+            "putchar": Label("putchar"),
+            "puts": Label("puts")
         }
 
         # Maps local variable names to their index (stack slot)
@@ -815,6 +816,57 @@ class Compiler(object):
         self.assembler.instruction(OpCode.POPQ, Register.RAX)
         self.assembler.instruction(OpCode.IMULQ, Register.RDX)
         self.assembler.instruction(OpCode.PUSHQ, Register.RAX)
+
+    def visitCompare(self, node: ast.Compare):
+        assert len(node.ops) == 1, 'only single comparisons supported'
+        self.visit(node.left)
+        self.visit(node.comparators[0])
+        self.visit(node.ops[0])
+
+    def _compile_comparison(self, jump_not: OpCode, slug: str):
+        # Generate a unique label to jump to if the comparison fails
+        label: Label = Label(self.ctx.label(slug))
+        self.ctx.newLabel(label)
+
+        # Pop the right-hand side and left-hand side values from the stack
+        self.assembler.instruction(OpCode.POPQ, Register.RDX)  # RHS
+        self.assembler.instruction(OpCode.POPQ, Register.RAX)  # LHS
+
+        # Compare RAX and RDX (effectively: RAX - RDX)
+        self.assembler.instruction(OpCode.CMPQ, Register.RDX, Register.RAX)
+
+        # Assume comparison is false: move 0 into RAX
+        self.assembler.instruction(OpCode.MOVQ, Literal(0), Register.RAX)
+
+        # If condition not met, jump to label (skip setting result to 1)
+        self.assembler.instruction(jump_not, label)
+
+        # Condition was true: set result in RAX to 1
+        self.assembler.instruction(OpCode.INCQ, Register.RAX)
+
+        # Label target for failed comparison or to continue after success
+        self.assembler.label(label)
+
+        # Push the result (0 or 1) back onto the stack
+        self.assembler.instruction(OpCode.PUSHQ, Register.RAX)
+
+    def visit_Lt(self, node: ast.Lt):
+        self._compile_comparison(OpCode.JNL, 'less')
+
+    def visit_LtE(self, node: ast.LtE):
+        self._compile_comparison(OpCode.JNLE, 'less_or_equal')
+
+    def visit_Gt(self, node: ast.Gt):
+        self._compile_comparison(OpCode.JNG, 'greater')
+
+    def visit_GtE(self, node: ast.GtE):
+        self._compile_comparison(OpCode.JNGE, 'greater_or_equal')
+
+    def visit_Eq(self, node: ast.Eq):
+        self._compile_comparison(OpCode.JNE, 'equal')
+
+    def visit_NotEq(self, node: ast.NotEq):
+        self._compile_comparison(OpCode.JE, 'not_equal')
 
     def compile(self, node: ast.Module):
         """
