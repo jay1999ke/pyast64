@@ -266,6 +266,9 @@ class Context(object):
         # static strings
         self.strings: Dict[str, LiteralString] = {}
 
+        # break labels stack
+        self.break_labels: List[Label] = []
+
     def label(self, slug: str) -> str:
         label = '{}_{}_{}'.format(
             self.current_function.name, self.label_num, slug)
@@ -291,6 +294,7 @@ class Context(object):
         self.locals_index = 0
         self.allocated_space_size = 0
         self.label_num = 1
+        self.break_labels = []
 
     def addLocal(self, local: str):
         """
@@ -350,6 +354,15 @@ class Context(object):
         if label.name in self.labels:
             raise Exception("Redefinition of function '{}'".format(label.name))
         self.labels[label.name] = label
+
+    def break_label_stack_push(self, label: Label):
+        self.break_labels.append(label)
+
+    def break_label_stack_tos(self) -> Label:
+        return self.break_labels[-1]
+
+    def break_label_stack_pop(self):
+        self.break_labels.pop()
 
     def getLabel(self, label: str, raise_exception: bool = True) -> Label:
         """
@@ -779,6 +792,33 @@ class Compiler(object):
         self.assembler.instruction(
             OpCode.POPQ, Dereference(Register.RBP).WithOffset(offset))
 
+    def visitAugAssign(self, node: ast.AugAssign):
+        """
+        Compile an augmented assignment statement (e.g., x += 1).
+
+        This works by:
+        1. Loading the current value of the variable.
+        2. Compiling the right-hand side expression.
+        3. Performing the binary operation.
+        4. Storing the result back to the same variable.
+
+        Args:
+            node (ast.AugAssign): The augmented assignment AST node.
+        """
+        # Load current value of the target variable
+        self.visit(node.target)
+
+        # Compile right-hand side expression
+        self.visit(node.value)
+
+        # Compile the operator
+        self.visit(node.op)
+
+        # Store result back to the same stack location
+        offset = self.ctx.getLocalOffset(node.target.id)
+        self.assembler.instruction(
+            OpCode.POPQ, Dereference(Register.RBP).WithOffset(offset))
+
     def visitExpr(self, node: ast.Expr):
         """
         Handle an expression statement by evaluating the expression
@@ -845,7 +885,7 @@ class Compiler(object):
         self.assembler.instruction(OpCode.INCQ, Register.RAX)
 
         # Label target for failed comparison or to continue after success
-        self.assembler.label(label)
+        self.assembler.label(label.Emit())
 
         # Push the result (0 or 1) back onto the stack
         self.assembler.instruction(OpCode.PUSHQ, Register.RAX)
@@ -894,7 +934,7 @@ class Compiler(object):
             self.assembler.instruction(OpCode.JMP, label_end)
 
         # Else label
-        self.assembler.label(label_else)
+        self.assembler.label(label_else.Emit())
 
         # Emit code for the 'else' block
         for statement in node.orelse:
@@ -902,8 +942,47 @@ class Compiler(object):
 
         # End label
         if node.orelse:
-            self.assembler.label(label_end)
+            self.assembler.label(label_end.Emit())
 
+    def visitWhile(self, node: ast.While):
+        # Create labels for loop start and break
+        label_while = Label(self.ctx.label('while'))
+        label_break = Label(self.ctx.label('break'))
+
+        self.ctx.newLabel(label_while)
+        self.ctx.newLabel(label_break)
+        self.ctx.break_label_stack_push(label_break)
+
+        # Start of while loop
+        self.assembler.label(label_while.Emit())
+
+        # Evaluate the loop condition
+        self.visit(node.test)
+
+        # Compare condition to 0 (false)
+        self.assembler.instruction(OpCode.POPQ, Register.RAX)
+        self.assembler.instruction(OpCode.CMPQ, Literal(0), Register.RAX)
+
+        # Jump to break if condition is false
+        self.assembler.instruction(OpCode.JZ, label_break)
+
+        # Emit loop body
+        for statement in node.body:
+            self.visit(statement)
+
+        # Jump back to start of loop
+        self.assembler.instruction(OpCode.JMP, label_while)
+
+        # Break label (exit point)
+        self.assembler.label(label_break.Emit())
+
+        # Pop off the label
+        self.ctx.break_label_stack_pop()
+
+    def visitBreak(self, node: ast.Break):
+        # Unconditional jump to the current break label
+        self.assembler.instruction(
+            OpCode.JMP, self.ctx.break_label_stack_tos())
 
     def compile(self, node: ast.Module):
         """

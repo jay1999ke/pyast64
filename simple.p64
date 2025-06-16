@@ -4,4 +4,9 @@ def func(a):
 
 def main():
     a = 65
-    printf('%d\n', func(a))
+    i = 0
+    i < 9
+    while i < 40:
+        printf("%d", i)
+        puts("")
+        i += 1
