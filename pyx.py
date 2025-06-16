@@ -850,23 +850,60 @@ class Compiler(object):
         # Push the result (0 or 1) back onto the stack
         self.assembler.instruction(OpCode.PUSHQ, Register.RAX)
 
-    def visit_Lt(self, node: ast.Lt):
+    def visitLt(self, node: ast.Lt):
         self._compile_comparison(OpCode.JNL, 'less')
 
-    def visit_LtE(self, node: ast.LtE):
+    def visitLtE(self, node: ast.LtE):
         self._compile_comparison(OpCode.JNLE, 'less_or_equal')
 
-    def visit_Gt(self, node: ast.Gt):
+    def visitGt(self, node: ast.Gt):
         self._compile_comparison(OpCode.JNG, 'greater')
 
-    def visit_GtE(self, node: ast.GtE):
+    def visitGtE(self, node: ast.GtE):
         self._compile_comparison(OpCode.JNGE, 'greater_or_equal')
 
-    def visit_Eq(self, node: ast.Eq):
+    def visitEq(self, node: ast.Eq):
         self._compile_comparison(OpCode.JNE, 'equal')
 
-    def visit_NotEq(self, node: ast.NotEq):
+    def visitNotEq(self, node: ast.NotEq):
         self._compile_comparison(OpCode.JE, 'not_equal')
+
+    def visitIf(self, node: ast.If):
+        # Evaluate the condition expression
+        self.visit(node.test)
+
+        # Compare result to 0 (false)
+        self.assembler.instruction(OpCode.POPQ, Register.RAX)
+        self.assembler.instruction(OpCode.CMPQ, Literal(0), Register.RAX)
+
+        # Labels for else and end
+        label_else = Label(self.ctx.label('else'))
+        label_end = Label(self.ctx.label('end'))
+        self.ctx.newLabel(label_else)
+        self.ctx.newLabel(label_end)
+
+        # Jump to else block if condition is false (== 0)
+        self.assembler.instruction(OpCode.JZ, label_else)
+
+        # Emit code for the 'if' block
+        for statement in node.body:
+            self.visit(statement)
+
+        # If there's an else block, jump over it after if-block
+        if node.orelse:
+            self.assembler.instruction(OpCode.JMP, label_end)
+
+        # Else label
+        self.assembler.label(label_else)
+
+        # Emit code for the 'else' block
+        for statement in node.orelse:
+            self.visit(statement)
+
+        # End label
+        if node.orelse:
+            self.assembler.label(label_end)
+
 
     def compile(self, node: ast.Module):
         """
