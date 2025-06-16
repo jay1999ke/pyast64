@@ -984,6 +984,54 @@ class Compiler(object):
         self.assembler.instruction(
             OpCode.JMP, self.ctx.break_label_stack_tos())
 
+    def visitFor(self, node: ast.For):
+        # Turn for+range loop into a while loop:
+        #   i = start
+        #   while i < stop:
+        #       body
+        #       i = i + step
+        assert isinstance(node.iter, ast.Call) and \
+            node.iter.func.id == 'range', \
+            'for can only be used with range()'
+        
+        # Get your start, stop and step
+        range_args = node.iter.args
+        if len(range_args) == 1:
+            start = ast.Constant(value=0)
+            stop = range_args[0]
+            step = ast.Constant(value=1)
+        elif len(range_args) == 2:
+            start, stop = range_args
+            step = ast.Constant(value=1)
+        else:
+            start, stop, step = range_args
+            if (isinstance(step, ast.UnaryOp) and
+                    isinstance(step.op, ast.USub) and
+                    isinstance(step.operand, ast.Constant)):
+                # Handle negative step
+                step = ast.Constant(value=-step.operand.value)
+            assert isinstance(step, ast.Constant) and step.value != 0, \
+                'range() step must be a nonzero integer constant'
+            
+        # i = start
+        self.visit(ast.Assign(targets=[node.target], value=start))
+
+        # i < stop
+        test = ast.Compare(
+            left=node.target,
+            ops=[ast.Lt() if step.value > 0 else ast.Gt()],
+            comparators=[stop],
+        )
+
+        # i = i + step
+        incr = ast.Assign(
+            targets=[node.target],
+            value=ast.BinOp(left=node.target, op=ast.Add(), right=step),
+        )
+
+        # Test, body and step
+        self.visit(ast.While(test=test, body=node.body + [incr]))
+
     def compile(self, node: ast.Module):
         """
         Compile the given AST module into assembly output.
