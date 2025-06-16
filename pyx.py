@@ -663,11 +663,11 @@ class Compiler(object):
         # Restore previous base pointer (stack frame)
         self.assembler.instruction(OpCode.POPQ, Register.RBP)
 
-        # TODO: what is this?
+        # Deallocate stack space
         if self.ctx.allocated_space_size > 0:
             offset: int = self.ctx.allocated_space_size * 8
             self.assembler.instruction(
-                OpCode.LEAQ, Dereference(Register.RSP).WithOffset(offset), Register.RSP)
+                OpCode.ADDQ, Literal(offset), Register.RSP)
 
         # Return from function
         self.assembler.instruction(OpCode.RET)
