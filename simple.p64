@@ -1,9 +1,7 @@
 
 def func(a):
-    b = 6
-    return a
+    return a * 2
 
 def main():
-    a = 67
-    func(a)
-    printf("hello")
+    a = 65
+    printf('%d\n', func(a))

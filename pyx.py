@@ -169,7 +169,8 @@ class Directive(Emitter, Enum):
 
     def Emit(self) -> str:
         if self == Directive.String:
-            return '.asciz \"{}\"'.format(self.string)
+            escaped: str = self.string.encode('unicode_escape').decode('ascii')
+            return '.asciz \"{}\"'.format(escaped)
         return self.value
 
     def AsString(self, string: str) -> Emitter:
@@ -245,7 +246,8 @@ class Context(object):
         # All declared function labels (e.g., function names)
         self.labels: Dict[str, Label] = {}
         self.libc_labels: Dict[str, Label] = {
-            "printf": Label("printf")
+            "printf": Label("printf"),
+            "putchar": Label("putchar")
         }
 
         # Maps local variable names to their index (stack slot)
@@ -789,6 +791,30 @@ class Compiler(object):
 
         # Store the result in RAX
         self.assembler.instruction(OpCode.POPQ, Register.RAX)
+
+    #
+    # Operations follow
+    #
+
+    def _simple_binop(self, op: OpCode):
+        self.assembler.instruction(OpCode.POPQ, Register.RDX)
+        self.assembler.instruction(OpCode.POPQ, Register.RAX)
+        self.assembler.instruction(op, Register.RDX, Register.RAX)
+        self.assembler.instruction(OpCode.PUSHQ, Register.RAX)
+
+    def visitBinOp(self, node: ast.BinOp):
+        self.visit(node.left)
+        self.visit(node.right)
+        self.visit(node.op)
+
+    def visitAdd(self, node: ast.Add):
+        self._simple_binop(OpCode.ADDQ)
+
+    def visitMult(self, node: ast.Mult):
+        self.assembler.instruction(OpCode.POPQ, Register.RDX)
+        self.assembler.instruction(OpCode.POPQ, Register.RAX)
+        self.assembler.instruction(OpCode.IMULQ, Register.RDX)
+        self.assembler.instruction(OpCode.PUSHQ, Register.RAX)
 
     def compile(self, node: ast.Module):
         """
