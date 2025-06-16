@@ -1,3 +1,9 @@
 
+def func(a):
+    b = 6
+    return a
+
 def main():
-    a = 1
+    a = 67
+    func(a)
+    printf("hello")

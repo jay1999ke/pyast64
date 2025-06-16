@@ -2,7 +2,7 @@ import argparse
 import ast
 from enum import Enum
 import sys
-from typing import Callable, List, TextIO
+from typing import Callable, Dict, List, TextIO
 from astpretty import pprint as pp
 
 
@@ -35,6 +35,16 @@ class Register(Emitter, Enum):
     def Emit(self):
         return "%{}".format(self.value)
 
+    @staticmethod
+    def functionOrder() -> List:
+        return [
+            Register.RDI,
+            Register.RSI,
+            Register.RDX,
+            Register.RCX,
+            Register.R8,
+            Register.R9]
+
 
 class Literal(Emitter):
 
@@ -43,6 +53,28 @@ class Literal(Emitter):
 
     def Emit(self) -> str:
         return "${}".format(self.value)
+
+
+class LiteralString(Emitter):
+
+    def __init__(self, index: int, value: str) -> None:
+        self.index: int = index
+        self.value: str = value
+
+    def Emit(self) -> str:
+        return "$str{}".format(self.index)
+
+    def getLabel(self) -> str:
+        return "str{}".format(self.index)
+
+
+class Label(Emitter):
+
+    def __init__(self, name: str) -> None:
+        self.name: str = name
+
+    def Emit(self) -> str:
+        return self.name
 
 
 class Dereference(Emitter):
@@ -81,6 +113,7 @@ class OpCode(Emitter, Enum):
     LEAQ = "leaq"    # Load effective address quadword
     ADDQ = "addq"    # Add quadword
     SUBQ = "subq"    # Subtract quadword
+    SUB = "sub"      # Subtract word
     IMULQ = "imulq"  # Integer multiply quadword
     CQO = "cqo"      # Convert quadword to octword (sign extend)
     IDIV = "idiv"    # Integer divide
@@ -132,9 +165,16 @@ class Directive(Emitter, Enum):
     SectionText = ".section .text"   # Start of code section
     SectionData = ".section .data"   # Start of data section
     GlobalMain = ".globl main"       # Make 'main' global
+    String = "place_holder"
 
     def Emit(self) -> str:
+        if self == Directive.String:
+            return '.asciz \"{}\"'.format(self.string)
         return self.value
+
+    def AsString(self, string: str) -> Emitter:
+        self.string = string
+        return self
 
 
 class Assembler(object):
@@ -193,18 +233,224 @@ class Assembler(object):
 
 
 class Context(object):
+    """
+    Holds the current state of code generation, such as the current function,
+    local variable mappings, and function labels.
+    """
 
     def __init__(self) -> None:
+        # The function currently being compiled
         self.current_function: ast.FunctionDef = None
 
+        # All declared function labels (e.g., function names)
+        self.labels: Dict[str, Label] = {}
+        self.libc_labels: Dict[str, Label] = {
+            "printf": Label("printf")
+        }
+
+        # Maps local variable names to their index (stack slot)
+        self.locals: Dict[str, int] = {}
+
+        # Counter for number of local variables seen so far
+        self.locals_index = 0
+
+        # set allocated space
+        self.allocated_space_size = 0
+
+        # for unique labels
+        self.label_num = 1
+
+        # static strings
+        self.strings: Dict[str, LiteralString] = {}
+
+    def label(self, slug: str) -> str:
+        label = '{}_{}_{}'.format(
+            self.current_function.name, self.label_num, slug)
+        self.label_num += 1
+        return label
+
+    def setAllocatedSpace(self, space: int):
+        self.allocated_space_size = space
+
     def setFunction(self, function: ast.FunctionDef):
+        """
+        Set the function currently being compiled.
+        """
         self.current_function = function
 
     def resetFunction(self):
+        """
+        Reset the function context after function compilation is complete.
+        Clears locals and resets index.
+        """
         self.current_function = None
+        self.locals = {}
+        self.locals_index = 0
+        self.allocated_space_size = 0
+        self.label_num = 1
+
+    def addLocal(self, local: str):
+        """
+        Register a new local variable by name.
+
+        Args:
+            local (str): The variable name to track.
+        """
+        self.locals[local] = self.locals_index
+        self.locals_index += 1
+
+    def bumpLocalIndexForRIP(self):
+        self.locals_index += 1
+
+    def isALocal(self, string: str) -> bool:
+        return string in self.locals
+
+    def getLocalOffset(self, local_name: str) -> int:
+        """
+        Compute the stack offset for a given local variable.
+
+        Args:
+            local_name (str): The name of the local variable.
+
+        Returns:
+            int: The offset from %rbp to access the variable.
+        """
+        index: int = self.locals[local_name]
+
+        # Earlier locals are deeper in the stack
+        offset: int = len(self.locals) - index
+
+        # Account for return address pushed by 'call'
+        offset += 1
+
+        return offset * 8
 
     def isInAFunction(self) -> bool:
-        return self.current_function != None
+        """
+        Check if we are currently inside a function.
+
+        Returns:
+            bool: True if in a function context, else False.
+        """
+        return self.current_function is not None
+
+    def newLabel(self, label: Label):
+        """
+        Register a new function label.
+
+        Args:
+            label (Label): The label to add.
+
+        Raises:
+            Exception: If the label is already defined.
+        """
+        if label.name in self.labels:
+            raise Exception("Redefinition of function '{}'".format(label.name))
+        self.labels[label.name] = label
+
+    def getLabel(self, label: str, raise_exception: bool = True) -> Label:
+        """
+        Retrieve a previously registered label.
+
+        Args:
+            label (str): The name of the label.
+
+        Returns:
+            Label: The corresponding Label object.
+
+        Raises:
+            Exception: If the label is not defined.
+        """
+        if label not in self.labels and label not in self.libc_labels:
+            if raise_exception:
+                raise Exception(
+                    "Calling an unknown function '{}'".format(label))
+            else:
+                return None
+        if label in self.libc_labels:
+            return self.libc_labels[label]
+        return self.labels[label]
+
+    def getLibcLabel(self, label: str, raise_exception: bool = True) -> Label:
+        """
+        Retrieve a previously registered label.
+
+        Args:
+            label (str): The name of the label.
+
+        Returns:
+            Label: The corresponding Label object.
+
+        Raises:
+            Exception: If the label is not defined.
+        """
+        if label not in self.libc_labels:
+            if raise_exception:
+                raise Exception(
+                    "Calling an unknown function '{}'".format(label))
+            else:
+                return None
+        return self.libc_labels[label]
+
+
+class LocalsVisitor(ast.NodeVisitor):
+    """
+    Recursively visit a FunctionDef node to find all local variables.
+
+    This helps determine how much stack space is needed by collecting
+    all variable names assigned within the function, excluding those
+    marked as global.
+    """
+
+    def __init__(self):
+        self.local_names: List[str] = []   # List of local variable names
+        self.global_names: List[str] = []  # List of global variable names
+
+    def add(self, name: str):
+        """
+        Add a variable name to the list of locals, unless it is declared global.
+
+        Args:
+            name (str): The variable name to add.
+        """
+        if name not in self.local_names and name not in self.global_names:
+            self.local_names.append(name)
+
+    def visit_Global(self, node: ast.Global):
+        """
+        Handle `global` statements to prevent those names from being treated as locals.
+
+        Args:
+            node (ast.Global): The global statement AST node.
+        """
+        self.global_names.extend(node.names)  # Mark these names as global
+
+    def visit_Assign(self, node):
+        """
+        Visit an assignment statement and collect the target variable name.
+
+        Args:
+            node (ast.Assign): The assignment AST node.
+
+        Raises:
+            AssertionError: If the assignment has multiple targets.
+        """
+        assert len(node.targets) == 1, \
+            'can only assign one variable at a time'  # Only handle single assignment
+        self.visit(node.value)  # Visit the value to catch nested assignments
+        target = node.targets[0]
+        self.add(target.id)  # Add the assigned variable to locals
+
+    def visit_For(self, node: ast.For):
+        """
+        Visit a `for` loop and register the loop variable as a local.
+
+        Args:
+            node (ast.For): The for-loop AST node.
+        """
+        self.add(node.target.id)  # Add loop variable as a local
+        for statement in node.body:
+            self.visit(statement)  # Visit loop body for nested locals
 
 
 class Compiler(object):
@@ -228,6 +474,12 @@ class Compiler(object):
 
         Appends a comment indicating the end of the generated code.
         """
+        if len(self.ctx.strings) > 0:
+            self.assembler.directive(Directive.SectionData)
+            for string in self.ctx.strings.keys():
+                literal: LiteralString = self.ctx.strings[string]
+                self.assembler.label(literal.getLabel())
+                self.assembler.directive(Directive.String.AsString(string))
         self.assembler.comment("the end")
 
     def visit(self, node: ast.AST):
@@ -263,13 +515,55 @@ class Compiler(object):
         assert not node.args.kwonlyargs, 'keyword-only args not supported'
         assert not node.args.kwarg, 'keyword args not supported'
 
+        def fetchArguments():
+            """
+            Add arguments to local variables
+            """
+            for arg in node.args.args:
+                self.ctx.addLocal(arg.arg)
+
         def functionHeader():
             """
             Emit the function label
             """
             if node.name == "main":
                 self.assembler.directive(Directive.GlobalMain)
+            self.ctx.newLabel(Label(node.name))
             self.assembler.label(node.name)
+
+        def allocateStackSpace() -> int:
+            """
+            Allocate stack space for all local variables used in the function,
+            including those assigned dynamically. This is done before setting up
+            the stack frame so that locals and function arguments are treated uniformly.
+            """
+
+            # Find names of additional locals assigned in this function
+            locals_visitor = LocalsVisitor()
+            locals_visitor.visit(node)
+
+            # If there are local variables used in this function
+            if len(locals_visitor.local_names) > 0:
+                # Add a dummy local to simulate space taken by return address (RIP)
+                self.ctx.bumpLocalIndexForRIP()
+
+                # Add new local variables to the context if not already present
+                for name in locals_visitor.local_names:
+                    if not self.ctx.isALocal(name):
+                        self.ctx.addLocal(name)
+
+            # Calculate how many additional local slots to allocate (excluding arguments)
+            num_extra_locals = len(self.ctx.locals) - len(node.args.args)
+
+            if num_extra_locals > 0:
+
+                # Allocate space for locals in one go using subq
+                # Each local is 8 bytes (quadword)
+                total_bytes = num_extra_locals * 8
+                self.assembler.instruction(
+                    OpCode.SUBQ, Literal(total_bytes), Register.RSP)
+                return num_extra_locals
+            return 0
 
         def updateStack():
             """
@@ -284,9 +578,6 @@ class Compiler(object):
 
             # Set the new base pointer to the current stack pointer
             self.assembler.instruction(OpCode.MOVQ, Register.RSP, Register.RBP)
-
-        def allocateStackSpace():
-            pass
 
         def visitBody():
             """
@@ -304,13 +595,33 @@ class Compiler(object):
                 # If the last statement is not an explicit return...
                 self.visitReturn(ast.Return())
 
-        self.ctx.setFunction(node)        # Set the current function context
-        functionHeader()                  # Emit function-level directives and label
-        updateStack()                     # Set up stack frame (push rbp, mov rsp to rbp)
-        allocateStackSpace()
-        visitBody()                       # Compile the function body
-        functionFooter()                  # Tear down stack frame and return
-        self.ctx.resetFunction()          # Clear the function context after codegen
+        # Set the current function context
+        self.ctx.setFunction(node)
+
+        # Gather our arguments
+        fetchArguments()
+
+        # Emit function-level directives and label
+        functionHeader()
+
+        # Allocate space for local variables before prologue
+        # so locals and function args are handled uniformly
+        self.ctx.setAllocatedSpace(allocateStackSpace())
+
+        # Set up stack frame (push rbp, mov rsp to rbp)
+        updateStack()
+
+        # Compile the function body
+        visitBody()
+
+        # Tear down stack frame and return
+        functionFooter()
+
+        # Clear the function context after codegen
+        self.ctx.resetFunction()
+
+        # visibility
+        self.assembler.comment()
 
     def visitPass(self, node: ast.Pass):
         pass
@@ -336,8 +647,89 @@ class Compiler(object):
         # Restore previous base pointer (stack frame)
         self.assembler.instruction(OpCode.POPQ, Register.RBP)
 
+        # TODO: what is this?
+        if self.ctx.allocated_space_size > 0:
+            offset: int = self.ctx.allocated_space_size * 8
+            self.assembler.instruction(
+                OpCode.LEAQ, Dereference(Register.RSP).WithOffset(offset), Register.RSP)
+
         # Return from function
         self.assembler.instruction(OpCode.RET)
+
+    def visitCall(self, node: ast.Call):
+        """
+        Compile a function call expression.
+
+        Args:
+            node (ast.Call): The AST node representing a function call.
+        """
+
+        def libCFuncsSetup():
+            if self.ctx.getLibcLabel(node.func.id, False):
+                assert len(node.args) < 7, \
+                    'can only call C lib funcs with 6 or less args'
+                for idx in range(len(node.args), 0, -1):
+                    self.assembler.instruction(
+                        OpCode.POPQ, Register.functionOrder()[idx-1])
+                # stack align to 16 bytes for certain libc functions
+                if (node.func.id.endswith('printf')):
+                    label: Label = Label(self.ctx.label('skip_push'))
+                    self.ctx.newLabel(label)
+                    self.assembler.instruction(
+                        OpCode.TEST, Literal(8), Register.RSP)
+                    self.assembler.instruction(OpCode.JE, label)
+                    self.assembler.instruction(OpCode.PUSHQ, Register.RSP)
+                    self.assembler.label(label.Emit())
+
+        def libCFuncsTeardown():
+            if self.ctx.getLibcLabel(node.func.id, False):
+                # libc alignment cleanup
+                if (node.func.id.endswith('printf')):
+                    label: Label = Label(self.ctx.label('skip_pop'))
+                    self.ctx.newLabel(label)
+                    self.assembler.instruction(
+                        OpCode.MOV, Dereference(Register.RSP).WithOffset(0), Register.RDX)
+                    self.assembler.instruction(
+                        OpCode.SUB, Literal(8), Register.RDX)
+                    self.assembler.instruction(
+                        OpCode.CMP, Register.RDX, Register.RSP)
+                    self.assembler.instruction(OpCode.JNE, label)
+                    self.assembler.instruction(OpCode.POPQ, Register.RDX)
+                    self.assembler.label(label.Emit())
+
+        # Evaluate each argument and push it on the stack (right-to-left order)
+        for arg in node.args:
+            self.visit(arg)
+
+        # special setup for libc functions
+        libCFuncsSetup()
+
+        # Call the function by label (function name must be known)
+        self.assembler.instruction(
+            OpCode.CALL, self.ctx.getLabel(node.func.id))
+
+        # special teardown for libc functions
+        libCFuncsTeardown()
+
+        # After call, adjust the stack to clean up arguments
+        if self.ctx.getLabel(node.func.id) and not self.ctx.getLibcLabel(node.func.id, False) and node.args:
+            self.assembler.instruction(
+                OpCode.ADDQ, Literal(8 * len(node.args)), Register.RSP)
+
+        # Function return value is in %rax — push it on the stack for later use
+        self.assembler.instruction(OpCode.PUSHQ, Register.RAX)
+
+    def visitName(self, node: ast.Name):
+        """
+        Compile a reference to a local variable.
+
+        Args:
+            node (ast.Name): The AST node representing a variable name.
+        """
+        # Lookup local variable offset and push its value from the stack
+        offset = self.ctx.getLocalOffset(node.id)
+        self.assembler.instruction(
+            OpCode.PUSHQ, Dereference(Register.RBP).WithOffset(offset))
 
     def visitConstant(self, node: ast.Constant):
         """
@@ -352,8 +744,51 @@ class Compiler(object):
         if isinstance(node.value, int):
             # Push integer constant to stack
             self.assembler.instruction(OpCode.PUSHQ, Literal(node.n))
+        elif isinstance(node.value, str):
+            if not node.value in self.ctx.strings:
+                self.ctx.strings[node.value] = LiteralString(
+                    len(self.ctx.strings), node.value)
+            self.assembler.instruction(
+                OpCode.PUSHQ, self.ctx.strings[node.value])
         else:
             assert False, 'only int constants supported'
+
+    def visitAssign(self, node: ast.Assign):
+        """
+        Compile an assignment statement.
+
+        This method assumes only a single local variable is being assigned.
+        The right-hand side is compiled first (its value pushed to stack),
+        then the value is popped into the correct stack offset.
+
+        Args:
+            node (ast.Assign): The assignment node from the AST.
+        """
+        # Only support single-target assignments (e.g., x = 42)
+        assert len(node.targets) == 1, \
+            'can only assign one variable at a time'
+
+        # Compile the expression on the right-hand side of the assignment
+        self.visit(node.value)
+
+        # Store the result in the stack slot for the local variable
+        offset = self.ctx.getLocalOffset(node.targets[0].id)
+        self.assembler.instruction(
+            OpCode.POPQ, Dereference(Register.RBP).WithOffset(offset))
+
+    def visitExpr(self, node: ast.Expr):
+        """
+        Handle an expression statement by evaluating the expression
+        and storing its result in the RAX register.
+
+        Args:
+            node (ast.Expr): An expression node.
+        """
+        # Evaluate the expression and push result onto the stack
+        self.visit(node.value)
+
+        # Store the result in RAX
+        self.assembler.instruction(OpCode.POPQ, Register.RAX)
 
     def compile(self, node: ast.Module):
         """
