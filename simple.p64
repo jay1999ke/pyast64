@@ -23,10 +23,10 @@ def matmul():
     BLOCK_SIZE = 32
 
     print_flag = PRINT_OFF
-    version_flag = VERSION_BLOCKED
+    version_flag = VERSION_IKJ
 
     P = 4
-    Q = 3
+    Q = 4
     R = 4
 
     x = int[P][Q]
@@ -35,12 +35,12 @@ def matmul():
     # Initialize x
     for i in range(P):
         for j in range(Q):
-            x[i][j] = i * Q + j
+            x[i][j] = i
 
     # Initialize y
     for i in range(Q):
         for j in range(R):
-            y[i][j] = i * R + j
+            y[i][j] = j
 
     if print_flag == PRINT_ON:
         print("x = \n")

@@ -167,6 +167,12 @@ class Instruction(Emitter):
     def Emit(self) -> str:
         return "\t{}\t{}".format(self.opcode.Emit(), ", ".join(arg.Emit() for arg in self.operands))
 
+    def __str__(self):
+        return self.Emit()
+
+    def __repr__(self):
+        return self.Emit()
+
 
 class Directive(Emitter, Enum):
     """
@@ -617,7 +623,7 @@ class Compiler(object):
         if optimize:
             self.optimizer: 'Optimizer' = Optimizer(self)
         else:
-            self.optimizer: 'Optimizer' = None  
+            self.optimizer: 'Optimizer' = None
         self.assembler: Assembler = Assembler(optimizer=self.optimizer)
         self.ctx: Context = Context()
 
@@ -1365,7 +1371,115 @@ class Optimizer(object):
         if not self.optimize:
             return batch
 
-        return batch
+        # We want to optimize the batch of
+        # instructions by combining a push
+        # and a pop into a single movq
+        # we also want to eliminate a push
+        # %rax followed by a pop %rax.
+
+        #   pushq	144(%rbp)
+        #   pushq	128(%rbp)
+        #   popq	%rdx
+        #   popq	%rax
+
+        #   imulq	%rdx
+
+        # redundant
+        #   pushq	%rax
+        #   popq	%rax
+
+
+        # states
+        DEFAULT = 0
+        PUSH = 1
+        POP = 2
+
+        # default
+        current_state = DEFAULT
+        push_stack: List[Instruction] = []
+
+        new_batch: List[Instruction] = []
+
+        def optimize(batch: List[Instruction]) -> List[Instruction]:
+
+            index: int = 0
+
+            while index < len(batch):
+                if batch[index].opcode == OpCode.POPQ:
+                    break
+                index += 1
+
+            pop_index = index
+            push_index = pop_index - 1
+
+            new_batch: List[Instruction] = []
+            while push_index >= 0 and pop_index < len(batch):
+                popq = batch[pop_index]
+                pushq = batch[push_index]
+
+                # new instruction
+                if pushq.operands[0].Emit() != popq.operands[0].Emit():
+
+                    # fail if both are 'Derefence'
+                    if isinstance(pushq.operands[0],
+                                  Dereference) and isinstance(
+                            popq.operands[0], Dereference):
+                        return batch
+                    new_batch.append(Instruction(
+                        OpCode.MOVQ, (pushq.operands[0], popq.operands[0])))
+
+                pop_index += 1
+                push_index -= 1
+            # print("old=", batch)
+            batch[push_index + 1:pop_index] = new_batch
+            # print("new=", batch)
+            return batch
+
+        for instr in batch:
+            if current_state == DEFAULT:
+                if instr.opcode == OpCode.PUSHQ:
+                    push_stack = [instr]
+                    current_state = PUSH
+                else:
+                    new_batch.append(instr)
+
+                    # reset
+                    current_state = DEFAULT
+                    push_stack.clear()
+            elif current_state == PUSH:
+                if instr.opcode == OpCode.PUSHQ:
+                    # possible chance of more pops later
+                    # no state change
+                    push_stack.append(instr)
+                elif instr.opcode == OpCode.POPQ:
+                    # expect pops here on
+                    push_stack.append(instr)
+                    current_state = POP
+                else:
+                    # darn, nothing can be done!
+                    new_batch.extend(push_stack)
+                    new_batch.append(instr)
+
+                    # reset
+                    current_state = DEFAULT
+                    push_stack.clear()
+            elif current_state == POP:
+                if instr.opcode == OpCode.POPQ:
+                    push_stack.append(instr)
+                else:
+                    new_batch.extend(optimize(push_stack))
+                    # reset
+                    current_state = DEFAULT
+                    push_stack.clear()
+
+                    if instr.opcode == OpCode.PUSHQ:
+                        push_stack = [instr]
+                        current_state = PUSH
+                    else:
+                        new_batch.append(instr)
+        if push_stack:
+            new_batch.extend(optimize(push_stack))
+        return new_batch
 
     def optimizeAst(self, node: ast.Module) -> ast.Module:
         if not self.optimize:
@@ -1382,5 +1496,5 @@ if __name__ == '__main__':
     with open(args.filename) as f:
         source = f.read()
     node = ast.parse(source, filename=args.filename)
-    compiler = Compiler()
+    compiler = Compiler(optimize=True)
     compiler.compile(node)
