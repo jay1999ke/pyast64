@@ -1,12 +1,8 @@
-
-def func(a):
-    return a * 2
-
 def main():
-    a = 65
-    i = 0
-    i < 9
-    while i < 40:
-        printf("%d", i)
-        puts("")
-        i += 1
+    x = int[26]
+    for i in range(26):
+        x[i] = 65 + i
+
+    for i in range(10):
+        print("%c,", x[i])
+    print("\n")

@@ -2,7 +2,7 @@ import argparse
 import ast
 from enum import Enum
 import sys
-from typing import Callable, Dict, List, TextIO
+from typing import Callable, Dict, List, Optional, TextIO
 from astpretty import pprint as pp
 
 
@@ -79,31 +79,41 @@ class Label(Emitter):
 
 class Dereference(Emitter):
     """
-    Represents a memory dereference operation on a register,
-    optionally with an integer offset.
+    Represents a memory dereference operation using x86-64 addressing modes.
 
-    This models assembly addressing modes like:
-    - (register)           : dereference at the address in the register
-    - offset(register)     : dereference at address (register + offset)
+    Supports:
+    - (register)                   : simple dereference
+    - offset(register)             : with offset
+    - (base, index, scale)         : scaled indexed addressing
+    - offset(base, index, scale)   : full addressing
     """
 
-    def __init__(self, register: Register) -> None:
-        self.register: Register = register
-        self.offset: int = None
+    def __init__(self, base: Register) -> None:
+        self.base: Register = base
+        self.offset: Optional[int] = None
+        self.index: Optional[Register] = None
+        self.scale: Optional[int] = None
 
-    def WithOffset(self, offset: int) -> Emitter:
-        """
-        Set an offset for the dereference, returning the updated instance.
-
-        Args:
-            offset (int): The offset to add to the base register address.
-        """
+    def WithOffset(self, offset: int) -> 'Dereference':
         self.offset = offset
         return self
 
+    def WithIndex(self, index: Register, scale: int = 1) -> 'Dereference':
+        self.index = index
+        self.scale = scale
+        return self
+
     def Emit(self) -> str:
-        offset: str = "{}".format(self.offset) if self.offset else ""
-        return "{offset}({register})".format(offset=offset, register=self.register.Emit())
+        offset = f"{self.offset}" if self.offset is not None else ""
+        base = self.base.Emit()
+        index = self.index.Emit() if self.index else ""
+        scale = f"{self.scale}" if self.index and self.scale != 1 else ""
+
+        # If using index, emit (base, index, scale), otherwise (base)
+        if self.index:
+            return f"{offset}({base},{index},{scale})"
+        else:
+            return f"{offset}({base})"
 
 
 class OpCode(Emitter, Enum):
@@ -135,6 +145,7 @@ class OpCode(Emitter, Enum):
     TEST = "test"    # Logical compare
     MOV = "mov"      # Move data
     CMP = "cmp"      # Compare
+    SHLQ = "shlq"    # Shift-left quadword
 
     def Emit(self) -> str:
         return self.value
@@ -234,6 +245,7 @@ class Assembler(object):
 
 
 class Context(object):
+
     """
     Holds the current state of code generation, such as the current function,
     local variable mappings, and function labels.
@@ -244,12 +256,13 @@ class Context(object):
         self.current_function: ast.FunctionDef = None
 
         # All declared function labels (e.g., function names)
-        self.labels: Dict[str, Label] = {}
+        self.labels: Dict[str, Label] = {
+            "array": Label("array"),  # built-in
+        }
         self.libc_labels: Dict[str, Label] = {
             "printf": Label("printf"),
             "putchar": Label("putchar"),
-            "puts": Label("puts"),
-            "print": Label("printf"), # Make it pretty for python 3 linters, code-formatters
+            "puts": Label("puts")
         }
 
         # Maps local variable names to their index (stack slot)
@@ -420,8 +433,9 @@ class LocalsVisitor(ast.NodeVisitor):
     """
 
     def __init__(self):
-        self.local_names: List[str] = []   # List of local variable names
-        self.global_names: List[str] = []  # List of global variable names
+        self.local_names: List[str] = []    # List of local variable names
+        self.global_names: List[str] = []   # List of global variable names
+        self.function_calls: List[str] = []  # Used for built-ins
 
     def add(self, name: str):
         """
@@ -456,7 +470,12 @@ class LocalsVisitor(ast.NodeVisitor):
             'can only assign one variable at a time'  # Only handle single assignment
         self.visit(node.value)  # Visit the value to catch nested assignments
         target = node.targets[0]
-        self.add(target.id)  # Add the assigned variable to locals
+
+        # Add the assigned variable to locals
+        if isinstance(target, ast.Subscript):
+            self.add(target.value.id)
+        else:
+            self.add(target.id)
 
     def visit_For(self, node: ast.For):
         """
@@ -469,6 +488,46 @@ class LocalsVisitor(ast.NodeVisitor):
         for statement in node.body:
             self.visit(statement)  # Visit loop body for nested locals
 
+    def visit_Call(self, node: ast.Call):
+        self.function_calls.append(node.func.id)
+
+
+class BuiltinTransformer(ast.NodeTransformer):
+    """
+    Replace:
+    - All instances of `x = int[12]` with `x = array(12)`
+    - All calls to `print(...)` with `printf(...)`
+    """
+
+    def visit_Assign(self, node: ast.Assign):
+        # Visit child nodes first (important if nested expressions exist)
+        self.generic_visit(node)
+
+        # Check if the value is a Subscript like int[12]
+        if isinstance(node.value, ast.Subscript):
+            target = node.value
+            # Check that the base is the name 'int'
+            if isinstance(target.value, ast.Name) and target.value.id == 'int':
+                # Replace with a call to array(12)
+                new_call = ast.Call(
+                    func=ast.Name(id='array', ctx=ast.Load()),
+                    args=[target.slice.value if isinstance(
+                        target.slice, ast.Index) else target.slice],
+                    keywords=[]
+                )
+                node.value = new_call
+
+        return node
+
+    def visit_Call(self, node: ast.Call):
+        # Visit arguments and other children first
+        self.generic_visit(node)
+
+        # Replace print(...) with printf(...)
+        if isinstance(node.func, ast.Name) and node.func.id == 'print':
+            node.func.id = 'printf'
+
+        return node
 
 class Compiler(object):
 
@@ -569,6 +628,10 @@ class Compiler(object):
                     if not self.ctx.isALocal(name):
                         self.ctx.addLocal(name)
 
+                # Add a new local variable that holds the total size of all arrays in the function
+                if 'array' in locals_visitor.function_calls:
+                    self.ctx.addLocal('_array_size')
+
             # Calculate how many additional local slots to allocate (excluding arguments)
             num_extra_locals = len(self.ctx.locals) - len(node.args.args)
 
@@ -576,9 +639,9 @@ class Compiler(object):
 
                 # Allocate space for locals in one go using subq
                 # Each local is 8 bytes (quadword)
-                total_bytes = num_extra_locals * 8
-                self.assembler.instruction(
-                    OpCode.SUBQ, Literal(total_bytes), Register.RSP)
+                for i in range(num_extra_locals):
+                    self.assembler.instruction(
+                        OpCode.PUSHQ, Literal(0))
                 return num_extra_locals
             return 0
 
@@ -661,6 +724,15 @@ class Compiler(object):
         if self.ctx.current_function.name == 'main' and not node.value:
             self.assembler.instruction(OpCode.MOVQ, Literal(0), Register.RAX)
 
+        # Deallocate space we alloted for arrays
+        if self.ctx.isALocal('_array_size'):
+            # Load _array_size into %rbx
+            offset = self.ctx.getLocalOffset('_array_size')
+            self.assembler.instruction(OpCode.MOVQ, Dereference(
+                Register.RBP).WithOffset(offset), Register.RBX)
+            # Add it back to %rsp to deallocate stack space
+            self.assembler.instruction(OpCode.ADDQ, Register.RBX, Register.RSP)
+
         # Restore previous base pointer (stack frame)
         self.assembler.instruction(OpCode.POPQ, Register.RBP)
 
@@ -668,7 +740,7 @@ class Compiler(object):
         if self.ctx.allocated_space_size > 0:
             offset: int = self.ctx.allocated_space_size * 8
             self.assembler.instruction(
-                OpCode.ADDQ, Literal(offset), Register.RSP)
+                OpCode.LEAQ, Dereference(Register.RSP).WithOffset(offset), Register.RSP)
 
         # Return from function
         self.assembler.instruction(OpCode.RET)
@@ -680,6 +752,13 @@ class Compiler(object):
         Args:
             node (ast.Call): The AST node representing a function call.
         """
+
+        def handleBuiltin() -> bool:
+            builtin = getattr(self, '_builtin_{}'.format(node.func.id), None)
+            if builtin is not None:
+                builtin(node.args)
+                return True
+            return False
 
         def libCFuncsSetup():
             if self.ctx.getLibcLabel(node.func.id, False):
@@ -713,6 +792,10 @@ class Compiler(object):
                     self.assembler.instruction(OpCode.JNE, label)
                     self.assembler.instruction(OpCode.POPQ, Register.RDX)
                     self.assembler.label(label.Emit())
+
+        # Cut short if we're dealing with a builtin
+        if handleBuiltin():
+            return
 
         # Evaluate each argument and push it on the stack (right-to-left order)
         for arg in node.args:
@@ -788,10 +871,39 @@ class Compiler(object):
         # Compile the expression on the right-hand side of the assignment
         self.visit(node.value)
 
-        # Store the result in the stack slot for the local variable
-        offset = self.ctx.getLocalOffset(node.targets[0].id)
-        self.assembler.instruction(
-            OpCode.POPQ, Dereference(Register.RBP).WithOffset(offset))
+        target = node.targets[0]
+        if isinstance(target, ast.Subscript):
+            # array[offset] = value
+
+            # visit the 'offset' part
+            self.visit(target.slice)
+
+            # RAX holds the offset
+            self.assembler.instruction(OpCode.POPQ, Register.RAX)
+
+            # RBX holds the value to store
+            self.assembler.instruction(OpCode.POPQ, Register.RBX)
+
+            # Get address of array base into RDX
+            array_offset = self.ctx.getLocalOffset(target.value.id)
+            self.assembler.instruction(
+                OpCode.MOVQ,
+                Dereference(Register.RBP).WithOffset(array_offset),
+                Register.RDX
+            )
+
+            # Store value (RBX) into array[offset] = *(RDX + RAX * 8)
+            self.assembler.instruction(
+                OpCode.MOVQ,
+                Register.RBX,
+                Dereference(Register.RDX).WithIndex(Register.RAX, 8)
+            )
+
+        else:
+            # Store the result in the stack slot for the local variable
+            offset = self.ctx.getLocalOffset(target.id)
+            self.assembler.instruction(
+                OpCode.POPQ, Dereference(Register.RBP).WithOffset(offset))
 
     def visitAugAssign(self, node: ast.AugAssign):
         """
@@ -994,7 +1106,7 @@ class Compiler(object):
         assert isinstance(node.iter, ast.Call) and \
             node.iter.func.id == 'range', \
             'for can only be used with range()'
-        
+
         # Get your start, stop and step
         range_args = node.iter.args
         if len(range_args) == 1:
@@ -1013,7 +1125,7 @@ class Compiler(object):
                 step = ast.Constant(value=-step.operand.value)
             assert isinstance(step, ast.Constant) and step.value != 0, \
                 'range() step must be a nonzero integer constant'
-            
+
         # i = start
         self.visit(ast.Assign(targets=[node.target], value=start))
 
@@ -1033,6 +1145,54 @@ class Compiler(object):
         # Test, body and step
         self.visit(ast.While(test=test, body=node.body + [incr]))
 
+    def _builtin_array(self, args):
+        assert len(args) == 1, 'array(len) expected 1 arg, not {}'.format(
+            len(args))
+
+        # Evaluate the array length expression
+        self.visit(args[0])
+
+        # Pop array length into %rax
+        self.assembler.instruction(OpCode.POPQ, Register.RAX)
+
+        # Multiply by 8 (bytes per element) → len * 8
+        self.assembler.instruction(OpCode.SHLQ, Literal(3), Register.RAX)
+
+        # Add array size to _array_size tracker
+        offset = self.ctx.getLocalOffset('_array_size')
+        self.assembler.instruction(
+            OpCode.ADDQ, Register.RAX, Dereference(Register.RBP).WithOffset(offset))
+
+        # Subtract size from %rsp (allocate space on stack)
+        self.assembler.instruction(OpCode.SUBQ, Register.RAX, Register.RSP)
+
+        # Store current %rsp (array base pointer) in %rax
+        self.assembler.instruction(OpCode.MOVQ, Register.RSP, Register.RAX)
+
+        # Push base pointer onto stack
+        self.assembler.instruction(OpCode.PUSHQ, Register.RAX)
+
+    def visitSubscript(self, node: ast.Subscript):
+        # Compile the index expression (e.g., `i` in a[i])
+        self.visit(node.slice)
+
+        # Pop the index into %rax
+        self.assembler.instruction(OpCode.POPQ, Register.RAX)
+
+        # Get the base address of the array from the local variable
+        offset = self.ctx.getLocalOffset(node.value.id)
+        self.assembler.instruction(
+            OpCode.MOVQ,
+            Dereference(Register.RBP).WithOffset(offset),
+            Register.RDX
+        )
+
+        # Push the array element located at (rdx + rax * 8)
+        self.assembler.instruction(
+            OpCode.PUSHQ,
+            Dereference(Register.RDX).WithIndex(Register.RAX, 8)
+        )
+
     def compile(self, node: ast.Module):
         """
         Compile the given AST module into assembly output.
@@ -1041,6 +1201,8 @@ class Compiler(object):
             node (ast.Module): The root node of the abstract syntax tree to compile.
         """
         self.header()
+        transformer = BuiltinTransformer()
+        transformer.visit(node)
         self.visit(node)
         self.footer()
 
