@@ -2,7 +2,7 @@ import argparse
 import ast
 from enum import Enum
 import sys
-from typing import Callable, Dict, List, Optional, TextIO
+from typing import Callable, Dict, List, Optional, Set, TextIO
 from astpretty import pprint as pp
 
 
@@ -1332,6 +1332,8 @@ class Compiler(object):
         # Pop the index into %rax
         self.assembler.instruction(OpCode.POPQ, Register.RAX)
 
+        # Hack: This is to fix a bug in the optimizer (see commit) 
+
         # Get the base address of the array from the local variable
         offset = self.ctx.getLocalOffset(node.value.id)
         self.assembler.instruction(
@@ -1340,10 +1342,17 @@ class Compiler(object):
             Register.RDX
         )
 
-        # Push the array element located at (rdx + rax * 8)
+        # Get the element located at (rdx + rax * 8)
+        self.assembler.instruction(
+            OpCode.MOVQ,
+            Dereference(Register.RDX).WithIndex(Register.RAX, 8),
+            Register.R8
+        )
+
+        # push that element
         self.assembler.instruction(
             OpCode.PUSHQ,
-            Dereference(Register.RDX).WithIndex(Register.RAX, 8)
+            Register.R8
         )
 
     def compile(self, node: ast.Module):
@@ -1400,6 +1409,31 @@ class Optimizer(object):
 
         new_batch: List[Instruction] = []
 
+        # Note: read commit! This part did now work. gotta fix it!
+        def findDerefPushes(instr: Instruction) -> Set[Register]:
+            assert instr.opcode == OpCode.PUSHQ
+            assert isinstance(instr.operands[0], Dereference)
+
+            reg_deref: Dereference = instr.operands[0]
+            s: Set[Register] = set()
+            s.add(reg_deref.base)
+            if reg_deref.index:
+                s.add(reg_deref.index)
+            return s
+        
+        def getUsedRegisters(operand: Emitter) -> Set[str]:
+            s: Set[Register] = set()
+            if isinstance(operand, Dereference):
+                reg_deref: Dereference = operand
+                s: Set[Register] = set()
+                s.add(reg_deref.base)
+                if reg_deref.index:
+                    s.add(reg_deref.index)
+            elif isinstance(operand, Register):
+                s.add(operand)
+            return s
+
+
         def optimize(batch: List[Instruction]) -> List[Instruction]:
 
             index: int = 0
@@ -1411,6 +1445,8 @@ class Optimizer(object):
 
             pop_index = index
             push_index = pop_index - 1
+
+            set_of_push_deref_registers: Set[Register] = set()
 
             new_batch: List[Instruction] = []
             while push_index >= 0 and pop_index < len(batch):
@@ -1427,12 +1463,20 @@ class Optimizer(object):
                         return batch
                     new_batch.append(Instruction(
                         OpCode.MOVQ, (pushq.operands[0], popq.operands[0])))
+                    
+                    # fail if pop contains a register used in push deref(register)
+                    for reg in getUsedRegisters(popq.operands[0]):
+                        if reg in set_of_push_deref_registers:
+                            return batch
+
+                    # set of used regisers in deref
+                    if isinstance(pushq.operands[0], Dereference):
+                        for reg in findDerefPushes(pushq):
+                            set_of_push_deref_registers.add(reg)
 
                 pop_index += 1
                 push_index -= 1
-            # print("old=", batch)
             batch[push_index + 1:pop_index] = new_batch
-            # print("new=", batch)
             return batch
 
         for instr in batch:
