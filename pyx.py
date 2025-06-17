@@ -190,7 +190,7 @@ class Directive(Emitter, Enum):
 
 
 class Assembler(object):
-    def __init__(self, output_file: TextIO = sys.stdout) -> None:
+    def __init__(self, optimizer: 'Optimizer' = None, output_file: TextIO = sys.stdout) -> None:
         """
         Initialize the Assembler.
 
@@ -200,12 +200,15 @@ class Assembler(object):
         self.output_file: TextIO = output_file
         # Current batch of instructions, flushed on label and end of function
         self.batch: List[Instruction] = []
+        self.optimizer: 'Optimizer' = optimizer
 
     def flush(self) -> None:
         """
         Emit all pending instructions in the batch to the output.
         Clears the batch after emitting.
         """
+        if self.optimizer:
+            self.batch = self.optimizer.optimizeBatch(self.batch)
         for instruction in self.batch:
             print(instruction.Emit(), file=self.output_file)
         self.batch = []
@@ -506,7 +509,7 @@ class BuiltinTransformer(ast.NodeTransformer):
     def visit_FunctionDef(self, node: ast.FunctionDef):
         assert self.func is None, "nested functions not supported"
         self.func = node
-        self.array_dims = {} # reset
+        self.array_dims = {}  # reset
 
         # visit body!
         for statement in node.body:
@@ -561,7 +564,7 @@ class BuiltinTransformer(ast.NodeTransformer):
                 node.value = new_call
 
         return node
-    
+
     def visit_Subscript(self, node: ast.Subscript):
         self.generic_visit(node)
 
@@ -592,7 +595,8 @@ class BuiltinTransformer(ast.NodeTransformer):
                         ctx=outer.ctx
                     )
                 elif varname != 'int':
-                    assert False, "Subscript of an unknown array '{}'".format(varname)
+                    assert False, "Subscript of an unknown array '{}'".format(
+                        varname)
 
         return node
 
@@ -609,8 +613,12 @@ class BuiltinTransformer(ast.NodeTransformer):
 
 class Compiler(object):
 
-    def __init__(self):
-        self.assembler: Assembler = Assembler()
+    def __init__(self, optimize: bool = True):
+        if optimize:
+            self.optimizer: 'Optimizer' = Optimizer(self)
+        else:
+            self.optimizer: 'Optimizer' = None  
+        self.assembler: Assembler = Assembler(optimizer=self.optimizer)
         self.ctx: Context = Context()
 
     def header(self) -> None:
@@ -1284,7 +1292,6 @@ class Compiler(object):
                 orelse=[while_gt]
             ))
 
-
     def _builtin_array(self, args):
         assert len(args) == 1, 'array(len) expected 1 arg, not {}'.format(
             len(args))
@@ -1343,8 +1350,28 @@ class Compiler(object):
         self.header()
         transformer = BuiltinTransformer()
         transformer.visit(node)
+        if self.optimizer:
+            node = self.optimizer.optimizeAst(node)
         self.visit(node)
         self.footer()
+
+
+class Optimizer(object):
+
+    def __init__(self, optimize: bool = True) -> None:
+        self.optimize: bool = optimize
+
+    def optimizeBatch(self, batch: List[Instruction]) -> List[Instruction]:
+        if not self.optimize:
+            return batch
+
+        return batch
+
+    def optimizeAst(self, node: ast.Module) -> ast.Module:
+        if not self.optimize:
+            return node
+
+        return node
 
 
 if __name__ == '__main__':
