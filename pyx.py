@@ -499,6 +499,22 @@ class BuiltinTransformer(ast.NodeTransformer):
     - All calls to `print(...)` with `printf(...)`
     """
 
+    def __init__(self):
+        self.array_dims = {}  # variable name → M (second dimension)
+        self.func = None
+
+    def visit_FunctionDef(self, node: ast.FunctionDef):
+        assert self.func is None, "nested functions not supported"
+        self.func = node
+        self.array_dims = {} # reset
+
+        # visit body!
+        for statement in node.body:
+            self.visit(statement)
+
+        self.func = None
+        return node
+
     def visit_Assign(self, node: ast.Assign):
         # Visit child nodes first (important if nested expressions exist)
         self.generic_visit(node)
@@ -506,8 +522,35 @@ class BuiltinTransformer(ast.NodeTransformer):
         # Check if the value is a Subscript like int[12]
         if isinstance(node.value, ast.Subscript):
             target = node.value
+
+            # Complex case,
+            outer = node.value
+            if isinstance(outer.value, ast.Subscript):
+                inner = outer.value
+                if isinstance(inner.value, ast.Name) and inner.value.id == 'int':
+                    # Compute N * M
+                    dim_n = inner.slice
+                    dim_m = outer.slice
+                    product = ast.BinOp(left=dim_n, op=ast.Mult(), right=dim_m)
+
+                    # Save M dimension for the target variable
+                    if isinstance(node.targets[0], ast.Name):
+                        varname = node.targets[0].id
+
+                        assert varname not in self.array_dims, "already seen '{}'".format(
+                            varname)
+                        self.array_dims[varname] = dim_m
+
+                    # Replace with array(N * M)
+                    node.value = ast.Call(
+                        func=ast.Name(id='array', ctx=ast.Load()),
+                        args=[product],
+                        keywords=[]
+                    )
+
+            # Simple case, int[X]
             # Check that the base is the name 'int'
-            if isinstance(target.value, ast.Name) and target.value.id == 'int':
+            elif isinstance(target.value, ast.Name) and target.value.id == 'int':
                 # Replace with a call to array(12)
                 new_call = ast.Call(
                     func=ast.Name(id='array', ctx=ast.Load()),
@@ -516,6 +559,40 @@ class BuiltinTransformer(ast.NodeTransformer):
                     keywords=[]
                 )
                 node.value = new_call
+
+        return node
+    
+    def visit_Subscript(self, node: ast.Subscript):
+        self.generic_visit(node)
+
+        if isinstance(node.value, ast.Subscript):
+            outer = node
+            inner = node.value
+
+            # Only proceed if base is a variable we know
+            if isinstance(inner.value, ast.Name):
+                varname = inner.value.id
+                if varname in self.array_dims:
+                    m = self.array_dims[varname]
+
+                    # dims
+                    row = inner.slice
+                    col = outer.slice
+
+                    # n * M + m
+                    offset = ast.BinOp(
+                        left=ast.BinOp(left=row, op=ast.Mult(), right=m),
+                        op=ast.Add(),
+                        right=col
+                    )
+
+                    return ast.Subscript(
+                        value=inner.value,
+                        slice=offset,
+                        ctx=outer.ctx
+                    )
+                elif varname != 'int':
+                    assert False, "Subscript of an unknown array '{}'".format(varname)
 
         return node
 
@@ -528,6 +605,7 @@ class BuiltinTransformer(ast.NodeTransformer):
             node.func.id = 'printf'
 
         return node
+
 
 class Compiler(object):
 
