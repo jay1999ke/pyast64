@@ -1261,6 +1261,52 @@ class Compiler(object):
                 value=ast.BinOp(left=node.target, op=ast.Add(), right=step),
             )
 
+            def unrollCondition() -> bool:
+                body: List = node.body
+                if len(body) > 1:
+                    return False
+                if not (isinstance(body[0], ast.AugAssign) or isinstance(body[0], ast.Assign)):
+                    return False
+                return True
+
+            if step.value > 0 and self.optimizer and unrollCondition():
+                # loop unrolling - optimization!
+                UNROLLCOUNT = 8
+                # converts:
+                """
+                while i < stop:
+                    body
+                    i += step
+                """
+                # to"
+                """
+                while i + 32 < stop:
+                    body
+                    i += step
+                    body
+                    i += step
+                    body
+                    i += step ... (32 times)
+                while i < stop:
+                    body
+                    i += step
+                """
+
+                # i + 32 < stop
+                test_32 = ast.Compare(
+                    left=ast.BinOp(left=node.target, op=ast.Add(),
+                                   right=ast.Constant(value=UNROLLCOUNT)),
+                    ops=[ast.Lt()],
+                    comparators=[stop],
+                )
+                unrolled_body = []
+                for i in range(UNROLLCOUNT):
+                    unrolled_body.extend(node.body)
+                    unrolled_body.append(incr)
+                    
+                # Test, body and step
+                self.visit(ast.While(test=test_32, body=unrolled_body))
+
             # Test, body and step
             self.visit(ast.While(test=test, body=node.body + [incr]))
         else:

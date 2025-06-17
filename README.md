@@ -161,6 +161,34 @@ Somehow performed worse
       33.352711000 seconds user
        0.035992000 seconds sys
 ```
+
+### Loop-unrolling for simple expressions
+```
+    version_flag = VERSION_IKJ
+
+    P = 2048
+    Q = 2048
+    R = 2048
+```
+```
+
+ Performance counter stats for './simple.exe':
+
+         26,845.74 msec task-clock                #    0.999 CPUs utilized          
+               783      context-switches          #    0.029 K/sec                  
+                 1      cpu-migrations            #    0.000 K/sec                  
+            24,620      page-faults               #    0.917 K/sec                  
+ 1,06,90,79,58,436      cycles                    #    3.982 GHz                    
+ 3,13,38,52,96,040      instructions              #    2.93  insn per cycle         
+    3,43,23,65,959      branches                  #  127.855 M/sec                  
+         51,11,669      branch-misses             #    0.15% of all branches        
+
+      26.860162904 seconds time elapsed
+
+      26.813966000 seconds user
+       0.031992000 seconds sys
+
+```
 -------------------
 -------------------
 inspired by pyast64:
