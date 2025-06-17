@@ -1332,7 +1332,7 @@ class Compiler(object):
         # Pop the index into %rax
         self.assembler.instruction(OpCode.POPQ, Register.RAX)
 
-        # Hack: This is to fix a bug in the optimizer (see commit) 
+        # Hack: This is to fix a bug in the optimizer (see commit)
 
         # Get the base address of the array from the local variable
         offset = self.ctx.getLocalOffset(node.value.id)
@@ -1397,7 +1397,6 @@ class Optimizer(object):
         #   pushq	%rax
         #   popq	%rax
 
-
         # states
         DEFAULT = 0
         PUSH = 1
@@ -1420,7 +1419,7 @@ class Optimizer(object):
             if reg_deref.index:
                 s.add(reg_deref.index)
             return s
-        
+
         def getUsedRegisters(operand: Emitter) -> Set[str]:
             s: Set[Register] = set()
             if isinstance(operand, Dereference):
@@ -1432,7 +1431,6 @@ class Optimizer(object):
             elif isinstance(operand, Register):
                 s.add(operand)
             return s
-
 
         def optimize(batch: List[Instruction]) -> List[Instruction]:
 
@@ -1456,23 +1454,30 @@ class Optimizer(object):
                 # new instruction
                 if pushq.operands[0].Emit() != popq.operands[0].Emit():
 
-                    # fail if both are 'Derefence'
                     if isinstance(pushq.operands[0],
                                   Dereference) and isinstance(
                             popq.operands[0], Dereference):
-                        return batch
-                    new_batch.append(Instruction(
-                        OpCode.MOVQ, (pushq.operands[0], popq.operands[0])))
-                    
-                    # fail if pop contains a register used in push deref(register)
-                    for reg in getUsedRegisters(popq.operands[0]):
-                        if reg in set_of_push_deref_registers:
-                            return batch
+                        # Use a temporary register to move memory to memory
+                        temp = Register.R8  # or use a free temp register tracked elsewhere
+                        new_batch.append(Instruction(
+                            OpCode.MOVQ, (pushq.operands[0], temp)))         # movq src_mem, %r10
+                        new_batch.append(Instruction(
+                            OpCode.MOVQ, (temp, popq.operands[0])))           # movq %r10, dest_mem
+                    else:
+                        new_batch.append(Instruction(
+                            OpCode.MOVQ, (pushq.operands[0], popq.operands[0])))
 
-                    # set of used regisers in deref
-                    if isinstance(pushq.operands[0], Dereference):
-                        for reg in findDerefPushes(pushq):
-                            set_of_push_deref_registers.add(reg)
+                    if False:
+                        # Dead code from the previous commit
+                        # fail if pop contains a register used in push deref(register)
+                        for reg in getUsedRegisters(popq.operands[0]):
+                            if reg in set_of_push_deref_registers:
+                                return batch
+
+                        # set of used regisers in deref
+                        if isinstance(pushq.operands[0], Dereference):
+                            for reg in findDerefPushes(pushq):
+                                set_of_push_deref_registers.add(reg)
 
                 pop_index += 1
                 push_index -= 1

@@ -83,7 +83,33 @@ a python3 compiler and asm optimizer
 
 ```
 ### Peephole #1
+```
+    version_flag = VERSION_CLASSIC
 
+    P = 2048
+    Q = 2048
+    R = 2048
+```
+Somehow performed worse
+```
+ Performance counter stats for './simple.exe':
+
+       2,06,176.98 msec task-clock                #    1.000 CPUs utilized          
+               874      context-switches          #    0.004 K/sec                  
+                 6      cpu-migrations            #    0.000 K/sec                  
+            24,621      page-faults               #    0.119 K/sec                  
+ 8,12,48,18,50,827      cycles                    #    3.941 GHz                    
+ 4,40,08,81,59,806      instructions              #    0.54  insn per cycle         
+   26,32,61,08,624      branches                  #  127.687 M/sec                  
+         98,31,048      branch-misses             #    0.04% of all branches        
+
+     206.185221903 seconds time elapsed
+
+     206.133394000 seconds user
+       0.043998000 seconds sys
+
+```
+-----
 ```
     version_flag = VERSION_IKJ
 
@@ -111,7 +137,30 @@ a python3 compiler and asm optimizer
 
 ```
 ----
+```
+    version_flag = VERSION_BLOCKED
 
+    P = 2048
+    Q = 2048
+    R = 2048
+```
+```
+ Performance counter stats for './simple.exe':
+
+         33,387.79 msec task-clock                #    0.999 CPUs utilized          
+             1,291      context-switches          #    0.039 K/sec                  
+                 2      cpu-migrations            #    0.000 K/sec                  
+            24,621      page-faults               #    0.737 K/sec                  
+ 1,31,44,39,42,628      cycles                    #    3.937 GHz                    
+ 3,21,40,52,06,162      instructions              #    2.45  insn per cycle         
+   27,31,16,55,600      branches                  #  818.013 M/sec                  
+      36,07,24,852      branch-misses             #    1.32% of all branches        
+
+      33.432480476 seconds time elapsed
+
+      33.352711000 seconds user
+       0.035992000 seconds sys
+```
 -------------------
 -------------------
 inspired by pyast64:
