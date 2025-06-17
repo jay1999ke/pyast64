@@ -8,4 +8,4 @@ fname=${fullname%.*}
 python3 pyx.py $1 > $fname.s
 as $fname.s -march=generic64 -o $fname.o
 gcc $fname.o -o $fname.exe -no-pie -z noexecstack
-./$fname.exe
+sudo perf stat ./$fname.exe

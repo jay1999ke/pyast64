@@ -1005,10 +1005,37 @@ class Compiler(object):
         # Compile the operator
         self.visit(node.op)
 
-        # Store result back to the same stack location
-        offset = self.ctx.getLocalOffset(node.target.id)
-        self.assembler.instruction(
-            OpCode.POPQ, Dereference(Register.RBP).WithOffset(offset))
+        if isinstance(node.target, ast.Subscript):
+            # array[offset] = value
+
+            # visit the 'offset' part
+            self.visit(node.target.slice)
+
+            # RAX holds the offset
+            self.assembler.instruction(OpCode.POPQ, Register.RAX)
+
+            # RBX holds the value to store
+            self.assembler.instruction(OpCode.POPQ, Register.RBX)
+
+            # Get address of array base into RDX
+            array_offset = self.ctx.getLocalOffset(node.target.value.id)
+            self.assembler.instruction(
+                OpCode.MOVQ,
+                Dereference(Register.RBP).WithOffset(array_offset),
+                Register.RDX
+            )
+
+            # Store value (RBX) into array[offset] = *(RDX + RAX * 8)
+            self.assembler.instruction(
+                OpCode.MOVQ,
+                Register.RBX,
+                Dereference(Register.RDX).WithIndex(Register.RAX, 8)
+            )
+        else:
+            # Store result back to the same stack location
+            offset = self.ctx.getLocalOffset(node.target.id)
+            self.assembler.instruction(
+                OpCode.POPQ, Dereference(Register.RBP).WithOffset(offset))
 
     def visitExpr(self, node: ast.Expr):
         """
@@ -1041,6 +1068,9 @@ class Compiler(object):
 
     def visitAdd(self, node: ast.Add):
         self._simple_binop(OpCode.ADDQ)
+
+    def visitSub(self, node: ast.Sub):
+        self._simple_binop(OpCode.SUBQ)
 
     def visitMult(self, node: ast.Mult):
         self.assembler.instruction(OpCode.POPQ, Register.RDX)
