@@ -1,3 +1,8 @@
+def min(a, b):
+    if a > b:
+        return b
+    return a
+
 def print2darray(a, n, m):
     for i in range(n):
         for j in range(m):
@@ -6,41 +11,87 @@ def print2darray(a, n, m):
     print("\n")
 
 def matmul():
+    # Configuration flags (use int constants)
+    PRINT_OFF = 0
+    PRINT_ON = 1
+    VERSION_CLASSIC = 0
+    VERSION_IKJ = 1
+    VERSION_BLOCKED = 2
 
-    # Configs
-    print_on = 0
-    P = 2048
-    Q = 64
-    R = 2048
+    # Blocked (tiled) matrix multiplication for cache locality
+    # Processes sub-blocks (tiles) of the matrices to improve spatial and temporal locality
+    BLOCK_SIZE = 32
+
+    print_flag = PRINT_OFF
+    version_flag = VERSION_BLOCKED
+
+    P = 4
+    Q = 3
+    R = 4
 
     x = int[P][Q]
     y = int[Q][R]
 
-    # init x
+    # Initialize x
     for i in range(P):
         for j in range(Q):
             x[i][j] = i * Q + j
 
-    # init y
+    # Initialize y
     for i in range(Q):
         for j in range(R):
             y[i][j] = i * R + j
 
-    if print_on:
+    if print_flag == PRINT_ON:
         print("x = \n")
         print2darray(x, P, Q)
         print("y = \n")
         print2darray(y, Q, R)
 
-    # Matrix multiplication: z = x * y
     z = int[P][R]
-    for i in range(P):            # iterate over rows of x
-        for j in range(R):        # iterate over cols of y
-            z[i][j] = 0
-            for k in range(Q):    # iterate over cols of x / rows of y
-                z[i][j] += x[i][k] * y[k][j]
 
-    if print_on:
+    if version_flag == VERSION_CLASSIC:
+        # Classic triple nested loops: i-j-k order
+        # Simple implementation, but poor cache usage due to accessing y[k][j] repeatedly with varying k
+        for i in range(P):
+            for j in range(R):
+                z[i][j] = 0  # Initialize the output element before accumulation
+                for k in range(Q):
+                    z[i][j] += x[i][k] * y[k][j]
+
+    elif version_flag == VERSION_IKJ:
+        # Loop order optimized for cache: i-k-j
+        # Accesses x and y more linearly, improving cache performance compared to classic
+        # Note: z[i][j] should be initialized to 0 before accumulation here too
+        for i in range(P):
+            for j in range(R):
+                z[i][j] = 0  # Initialize the output element before accumulation
+            for k in range(Q):
+                x_ik = x[i][k]  # Cache x[i][k] for inner loop use
+                for j in range(R):
+                    z[i][j] += x_ik * y[k][j]
+
+    elif version_flag == VERSION_BLOCKED:
+        # Initialize entire output matrix to zero before accumulation
+        for i in range(P):
+            for j in range(R):
+                z[i][j] = 0
+
+        for i0 in range(0, P, BLOCK_SIZE):
+            i_max = min(i0 + BLOCK_SIZE, P)  # Cache upper bound of i-block
+            for j0 in range(0, R, BLOCK_SIZE):
+                j_max = min(j0 + BLOCK_SIZE, R)  # Cache upper bound of j-block
+                for k0 in range(0, Q, BLOCK_SIZE):
+                    k_max = min(k0 + BLOCK_SIZE, Q)  # Cache upper bound of k-block
+                    for i in range(i0, i_max):
+                        for j in range(j0, j_max):
+                            sum = 0  # Temporary accumulator for the current element
+                            for k in range(k0, k_max):
+                                sum += x[i][k] * y[k][j]
+                            z[i][j] += sum  # Accumulate partial sum from block
+
+
+    if print_flag == PRINT_ON:
         print("z = \n")
         print2darray(z, P, R)
 

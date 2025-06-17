@@ -1211,11 +1211,13 @@ class Compiler(object):
         #   while i < stop:
         #       body
         #       i = i + step
+
+        # Only handle `for` loops with `range(...)`
         assert isinstance(node.iter, ast.Call) and \
-            node.iter.func.id == 'range', \
+            isinstance(node.iter.func, ast.Name) and node.iter.func.id == 'range', \
             'for can only be used with range()'
 
-        # Get your start, stop and step
+        # Extract range args
         range_args = node.iter.args
         if len(range_args) == 1:
             start = ast.Constant(value=0)
@@ -1226,32 +1228,62 @@ class Compiler(object):
             step = ast.Constant(value=1)
         else:
             start, stop, step = range_args
-            if (isinstance(step, ast.UnaryOp) and
-                    isinstance(step.op, ast.USub) and
-                    isinstance(step.operand, ast.Constant)):
-                # Handle negative step
-                step = ast.Constant(value=-step.operand.value)
-            assert isinstance(step, ast.Constant) and step.value != 0, \
-                'range() step must be a nonzero integer constant'
 
-        # i = start
+        # Generate: i = start
         self.visit(ast.Assign(targets=[node.target], value=start))
 
-        # i < stop
-        test = ast.Compare(
-            left=node.target,
-            ops=[ast.Lt() if step.value > 0 else ast.Gt()],
-            comparators=[stop],
-        )
+        # Optimization: if step is a constant, generate a single while loop
+        if isinstance(step, ast.Constant) and isinstance(step.value, int):
+            # i < stop
+            test = ast.Compare(
+                left=node.target,
+                ops=[ast.Lt() if step.value > 0 else ast.Gt()],
+                comparators=[stop],
+            )
 
-        # i = i + step
-        incr = ast.Assign(
-            targets=[node.target],
-            value=ast.BinOp(left=node.target, op=ast.Add(), right=step),
-        )
+            # i = i + step
+            incr = ast.Assign(
+                targets=[node.target],
+                value=ast.BinOp(left=node.target, op=ast.Add(), right=step),
+            )
 
-        # Test, body and step
-        self.visit(ast.While(test=test, body=node.body + [incr]))
+            # Test, body and step
+            self.visit(ast.While(test=test, body=node.body + [incr]))
+        else:
+            # Dynamic step: generate runtime branch
+            step_gt_zero_test = ast.Compare(
+                left=step,
+                ops=[ast.Gt()],
+                comparators=[ast.Constant(value=0)]
+            )
+
+            # Construct condition: while i < stop
+            test_lt = ast.Compare(
+                left=node.target,
+                ops=[ast.Lt()],
+                comparators=[stop]
+            )
+            incr = ast.Assign(
+                targets=[node.target],
+                value=ast.BinOp(left=node.target, op=ast.Add(), right=step)
+            )
+            while_lt = ast.While(test=test_lt, body=node.body + [incr])
+
+            # Construct condition: while i > stop
+            test_gt = ast.Compare(
+                left=node.target,
+                ops=[ast.Gt()],
+                comparators=[stop]
+            )
+            while_gt = ast.While(test=test_gt, body=node.body + [incr])
+
+            # Generate: if step > 0: while i < stop ... else: while i > stop ...
+            self.visit(ast.If(
+                test=step_gt_zero_test,
+                body=[while_lt],
+                orelse=[while_gt]
+            ))
+
 
     def _builtin_array(self, args):
         assert len(args) == 1, 'array(len) expected 1 arg, not {}'.format(
