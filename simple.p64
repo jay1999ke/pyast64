@@ -9,9 +9,9 @@ def matmul():
 
     # Configs
     print_on = 0
-    P = 3
-    Q = 40
-    R = 4
+    P = 2048
+    Q = 64
+    R = 2048
 
     x = int[P][Q]
     y = int[Q][R]
@@ -19,12 +19,12 @@ def matmul():
     # init x
     for i in range(P):
         for j in range(Q):
-            x[i][j] = i * P + j
+            x[i][j] = i * Q + j
 
     # init y
     for i in range(Q):
         for j in range(R):
-            y[i][j] = (Q - i) + j * Q
+            y[i][j] = i * R + j
 
     if print_on:
         print("x = \n")
