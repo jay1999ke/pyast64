@@ -32,6 +32,24 @@ class Register(Emitter, Enum):
     RSP = "rsp"  # Stack pointer
     RBP = "rbp"  # Base pointer (frame pointer)
 
+    # AVX512 registers
+    ZMM0 = "zmm0"   # AVX251 register
+    ZMM1 = "zmm1"   # AVX251 register
+    ZMM2 = "zmm2"   # AVX251 register
+    ZMM3 = "zmm3"   # AVX251 register
+    ZMM4 = "zmm4"   # AVX251 register
+    ZMM5 = "zmm5"   # AVX251 register
+    ZMM6 = "zmm6"   # AVX251 register
+    ZMM7 = "zmm7"   # AVX251 register
+    ZMM8 = "zmm8"   # AVX251 register
+    ZMM9 = "zmm9"   # AVX251 register
+    ZMM10 = "zmm10"  # AVX512 register
+    ZMM11 = "zmm11"  # AVX512 register
+    ZMM12 = "zmm12"  # AVX512 register
+    ZMM13 = "zmm13"  # AVX512 register
+    ZMM14 = "zmm14"  # AVX512 register
+    ZMM15 = "zmm15"  # AVX512 register
+
     def Emit(self):
         return "%{}".format(self.value)
 
@@ -146,6 +164,13 @@ class OpCode(Emitter, Enum):
     MOV = "mov"      # Move data
     CMP = "cmp"      # Compare
     SHLQ = "shlq"    # Shift-left quadword
+
+    # AVX2 instructions for matrix multiplication with uint64_t
+    VMOVDQU = "vmovdqu64"
+    # Broadcast a 64-bit integer to all lanes in a vector register
+    VPBROADCASTQ = "vpbroadcastq"
+    VPADDQ = "vpaddq"              # Add packed 64-bit integers
+    VPMULLQ = "vpmullq"  # Multiply packed 64-bit integers
 
     def Emit(self) -> str:
         return self.value
@@ -291,6 +316,21 @@ class Context(object):
 
         # break labels stack
         self.break_labels: List[Label] = []
+        self.simd: bool = False  # SIMD support flag
+        self.setShouldEmitSIMD = False
+
+        self.simd_free_registers: List[Register] = [
+            Register.ZMM0, Register.ZMM1, Register.ZMM2, Register.ZMM3,
+            Register.ZMM4, Register.ZMM5, Register.ZMM6, Register.ZMM7,
+            Register.ZMM8, Register.ZMM9, Register.ZMM10,]
+        
+        self.simd_register_stack: List[Register] = []
+
+    def get_free_simd_register(self) -> Register:
+        reg = self.simd_free_registers.pop(0)
+        self.simd_register_stack.append(reg)
+        return reg
+
 
     def label(self, slug: str) -> str:
         label = '{}_{}_{}'.format(
@@ -430,6 +470,24 @@ class Context(object):
             else:
                 return None
         return self.libc_labels[label]
+
+    def setSIMDOn(self):
+        self.simd = True
+
+    def setSimdOff(self):
+        self.simd = False
+
+    def isSIMDOn(self) -> bool:
+        return self.simd
+
+    def setShouldEmitSIMDOn(self):
+        self.setShouldEmitSIMD = True
+
+    def setShouldEmitSIMDOff(self):
+        self.setShouldEmitSIMD = False
+
+    def shouldEmitSIMD(self) -> bool:
+        return self.setShouldEmitSIMD
 
 
 class LocalsVisitor(ast.NodeVisitor):
@@ -626,6 +684,7 @@ class Compiler(object):
             self.optimizer: 'Optimizer' = None
         self.assembler: Assembler = Assembler(optimizer=self.optimizer)
         self.ctx: Context = Context()
+        self.disable_simd: bool = False
 
     def header(self) -> None:
         """
@@ -660,12 +719,20 @@ class Compiler(object):
         Raises:
             Exception: If no matching visit method is implemented for the node type.
         """
+        if self.ctx.shouldEmitSIMD():
+            print("# entry_simd_{}_".format(node.__class__.__name__))
+        if self.ctx.isSIMDOn():
+            if node.__class__.__name__ == "AugAssign":
+                self.ctx.setShouldEmitSIMDOn()
         name = node.__class__.__name__
         visit_func: Callable = getattr(self, "visit{}".format(name), None)
         if visit_func == None:
             raise Exception(
                 "'{} not supported - node {}'".format(name, ast.dump(node)))
         visit_func(node)
+        if self.ctx.isSIMDOn():
+            if node.__class__.__name__ == "AugAssign":
+                self.ctx.setShouldEmitSIMDOff()
 
     def visitModule(self, node: ast.Module):
         """
@@ -920,6 +987,14 @@ class Compiler(object):
         """
         # Lookup local variable offset and push its value from the stack
         offset = self.ctx.getLocalOffset(node.id)
+        if self.ctx.shouldEmitSIMD() and not self.disable_simd:
+            # SIMD support, broadcast the value to zmm1
+            reg = self.ctx.get_free_simd_register()
+            self.assembler.instruction(
+                OpCode.VPBROADCASTQ,
+                Dereference(Register.RBP).WithOffset(offset),
+                reg)
+            return
         self.assembler.instruction(
             OpCode.PUSHQ, Dereference(Register.RBP).WithOffset(offset))
 
@@ -1022,14 +1097,15 @@ class Compiler(object):
         if isinstance(node.target, ast.Subscript):
             # array[offset] = value
 
+            turnOnEmitSimd = self.ctx.shouldEmitSIMD()
+            self.ctx.setShouldEmitSIMDOff()
             # visit the 'offset' part
             self.visit(node.target.slice)
+            if turnOnEmitSimd:
+                self.ctx.setShouldEmitSIMDOn()
 
             # RAX holds the offset
             self.assembler.instruction(OpCode.POPQ, Register.RAX)
-
-            # RBX holds the value to store
-            self.assembler.instruction(OpCode.POPQ, Register.RBX)
 
             # Get address of array base into RDX
             array_offset = self.ctx.getLocalOffset(node.target.value.id)
@@ -1039,12 +1115,28 @@ class Compiler(object):
                 Register.RDX
             )
 
-            # Store value (RBX) into array[offset] = *(RDX + RAX * 8)
-            self.assembler.instruction(
-                OpCode.MOVQ,
-                Register.RBX,
-                Dereference(Register.RDX).WithIndex(Register.RAX, 8)
-            )
+            if turnOnEmitSimd and not self.disable_simd:
+                # The result is at the top of the stack
+                reg = self.ctx.simd_register_stack.pop()
+
+                # store the result at array[offset]
+                self.assembler.instruction(
+                    OpCode.VMOVDQU,
+                    reg,
+                    Dereference(Register.RDX).WithIndex(Register.RAX, 8)
+                )
+
+                self.ctx.simd_free_registers.append(reg)
+            else:
+                # RBX holds the value to store
+                self.assembler.instruction(OpCode.POPQ, Register.RBX)
+
+                # Store value (RBX) into array[offset] = *(RDX + RAX * 8)
+                self.assembler.instruction(
+                    OpCode.MOVQ,
+                    Register.RBX,
+                    Dereference(Register.RDX).WithIndex(Register.RAX, 8)
+                )
         else:
             # Store result back to the same stack location
             offset = self.ctx.getLocalOffset(node.target.id)
@@ -1081,16 +1173,38 @@ class Compiler(object):
         self.visit(node.op)
 
     def visitAdd(self, node: ast.Add):
-        self._simple_binop(OpCode.ADDQ)
+        if self.ctx.shouldEmitSIMD() and not self.disable_simd:
+            # get the registers used (they are at the top of the stack)
+            reg1 = self.ctx.simd_register_stack.pop()
+            reg2 = self.ctx.simd_register_stack[-1]  # peek at the top register
+
+            self.assembler.instruction(
+                OpCode.VPADDQ, reg1, reg2, reg2)
+            
+            # free the register
+            self.ctx.simd_free_registers.append(reg1)
+        else:
+            self._simple_binop(OpCode.ADDQ)
 
     def visitSub(self, node: ast.Sub):
         self._simple_binop(OpCode.SUBQ)
 
     def visitMult(self, node: ast.Mult):
-        self.assembler.instruction(OpCode.POPQ, Register.RDX)
-        self.assembler.instruction(OpCode.POPQ, Register.RAX)
-        self.assembler.instruction(OpCode.IMULQ, Register.RDX)
-        self.assembler.instruction(OpCode.PUSHQ, Register.RAX)
+        if self.ctx.shouldEmitSIMD() and not self.disable_simd:
+            # get the registers used (they are at the top of the stack)
+            reg1 = self.ctx.simd_register_stack.pop()
+            reg2 = self.ctx.simd_register_stack[-1]  # peek at the top register
+
+            self.assembler.instruction(
+                OpCode.VPMULLQ, reg1, reg2, reg2)
+            
+            # free the register
+            self.ctx.simd_free_registers.append(reg1)
+        else:
+            self.assembler.instruction(OpCode.POPQ, Register.RDX)
+            self.assembler.instruction(OpCode.POPQ, Register.RAX)
+            self.assembler.instruction(OpCode.IMULQ, Register.RDX)
+            self.assembler.instruction(OpCode.PUSHQ, Register.RAX)
 
     def visitCompare(self, node: ast.Compare):
         assert len(node.ops) == 1, 'only single comparisons supported'
@@ -1303,9 +1417,30 @@ class Compiler(object):
                 for i in range(UNROLLCOUNT):
                     unrolled_body.extend(node.body)
                     unrolled_body.append(incr)
-                    
+
+                validForSIMD = self.optimizer.validForSIMD(
+                    node.body[0], test, self)
+                if validForSIMD:
+                    print("# validForSIMD: {}".format(node.body[0]))
+                    self.ctx.setSIMDOn()
+
+                    if not self.disable_simd:
+                        simd_incr = ast.Assign(
+                            targets=[node.target],
+                            value=ast.BinOp(
+                                left=node.target,
+                                op=ast.Add(),
+                                right=ast.Constant(value=UNROLLCOUNT * step.value)
+                            )
+                        )       
+                        unrolled_body = [node.body[0]] + [simd_incr]
+
                 # Test, body and step
                 self.visit(ast.While(test=test_32, body=unrolled_body))
+
+                # turn off SIMD
+                if validForSIMD:
+                    self.ctx.setSimdOff()
 
             # Test, body and step
             self.visit(ast.While(test=test, body=node.body + [incr]))
@@ -1373,7 +1508,13 @@ class Compiler(object):
 
     def visitSubscript(self, node: ast.Subscript):
         # Compile the index expression (e.g., `i` in a[i])
+
+        turnOnSIMD = self.ctx.shouldEmitSIMD()
+        self.ctx.setShouldEmitSIMDOff()
         self.visit(node.slice)
+
+        if turnOnSIMD:
+            self.ctx.setShouldEmitSIMDOn()
 
         # Pop the index into %rax
         self.assembler.instruction(OpCode.POPQ, Register.RAX)
@@ -1388,6 +1529,15 @@ class Compiler(object):
             Register.RDX
         )
 
+        if turnOnSIMD and not self.disable_simd:
+            # emit SIMD code
+            reg = self.ctx.get_free_simd_register()
+            self.assembler.instruction(
+                OpCode.VMOVDQU,
+                Dereference(Register.RDX).WithIndex(Register.RAX, 8),
+                reg
+            )
+            return
         # Get the element located at (rdx + rax * 8)
         self.assembler.instruction(
             OpCode.MOVQ,
@@ -1415,6 +1565,134 @@ class Compiler(object):
             node = self.optimizer.optimizeAst(node)
         self.visit(node)
         self.footer()
+
+
+class SIMDVisitor(ast.NodeVisitor):
+    """
+    A visitor for handling SIMD operations in the AST.
+        Cases:
+        1. z and y accesses are contiguous. (supported)
+            x_ik = x[i][k]  # Cache x[i][k] for inner loop use
+            for j in range(R):
+                z[i][j] += x_ik * y[k][j]
+
+        The only case we support
+    """
+
+    def __init__(self, forloopTarget: ast.Name):
+        super().__init__()
+        self.target: ast.Name = forloopTarget
+
+    def assertVisit(self, node: ast.AST):
+        assert isinstance(node, ast.AugAssign)
+        self.visit(node)
+
+    def visit(self, node):
+        name = node.__class__.__name__
+        visit_func = getattr(self, "visit{}".format(name), None)
+        if visit_func is None:
+            raise Exception("SIMD not supported for {}".format(name))
+        visit_func(node)
+
+    def visitAugAssign(self, node: ast.AugAssign):
+        """
+        Handle augmented assignment statements in the SIMD context.
+        """
+        assign_target = node.target
+
+        # z[i][j] += x_ik * y[k][j]
+        # only z supported
+        if isinstance(assign_target, ast.Subscript):
+            # Handle 1d slice. a[i] where i must be the for loop target
+            slice = assign_target.slice
+
+            if isinstance(slice, ast.BinOp):
+                if not isinstance(slice.op, ast.Add):
+                    raise Exception()
+
+                # z[i][j] "j"
+                if not isinstance(slice.right, ast.Name) or slice.right.id != self.target.id:
+                    raise Exception()
+                # now the slice.left must be a Name or a ast.BinOp tree with
+                # no ast.Name that matches our self.target.id
+
+                def binOpOrNameVisitor(node: ast.AST) -> bool:
+                    if isinstance(node, ast.Name):
+                        return node.id != self.target.id
+                    elif isinstance(node, ast.BinOp):
+                        return binOpOrNameVisitor(node.left) and binOpOrNameVisitor(node.right)
+                    elif isinstance(node, ast.Constant):
+                        return True
+                    else:
+                        return False
+
+                if not binOpOrNameVisitor(slice.left):
+                    raise Exception
+            else:
+                raise Exception
+        elif isinstance(assign_target, ast.Name):
+            # it's possible to support this but for now we only support Subscript
+            raise Exception("SIMD only supports Subscript assignments")
+
+        if not isinstance(node.op, ast.Add):
+            raise Exception("SIMD only supports += operations")
+
+        # see if value is supported
+        self.visit(node.value)
+
+    def visitBinOp(self, node: ast.BinOp):
+        """
+        Handle binary operations in the SIMD context.
+        """
+        if not isinstance(node.op, (ast.Add, ast.Mult)):
+            print("Unsupported operation: {}".format(type(node.op)))
+            raise Exception("SIMD only supports + and * operations")
+
+        # Check if left and right operands are valid
+        if not isinstance(node.left, (ast.Subscript, ast.Name)) and not isinstance(
+                node.right, (ast.Subscript, ast.Name)):
+            raise Exception
+
+        # x_ik * y[k][j]
+        self.visit(node.left)
+        self.visit(node.right)
+
+    def visitName(self, node: ast.Name):
+        # x_ik * y[k][j]
+        # x_ik is fine, not "i" though
+        if node.id == self.target.id:
+            raise Exception
+
+    def visitSubscript(self, node: ast.Subscript):
+        slice = node.slice
+
+        if isinstance(slice, ast.Name):
+            # y[j]
+            if slice.id != self.target.id:
+                raise Exception()
+        elif isinstance(slice, ast.BinOp):
+            # y[k][j]
+            if not isinstance(slice.op, ast.Add):
+                raise Exception()
+            # "j"
+            if not isinstance(slice.right, ast.Name) or slice.right.id != self.target.id:
+                raise Exception()
+            # now the slice.left must be a Name or a ast.BinOp tree with
+            # no ast.Name that matches our self.target.id
+
+            # every thing here will remain constant
+            def binOpOrNameVisitor(node: ast.AST) -> bool:
+                if isinstance(node, ast.Name):
+                    return node.id != self.target.id
+                elif isinstance(node, ast.BinOp):
+                    return binOpOrNameVisitor(node.left) and binOpOrNameVisitor(node.right)
+                elif isinstance(node, ast.Constant):
+                    return True
+                else:
+                    return False
+
+            if not binOpOrNameVisitor(slice.left):
+                raise Exception
 
 
 class Optimizer(object):
@@ -1582,6 +1860,28 @@ class Optimizer(object):
 
         return node
 
+    def validForSIMD(self, node: ast.AST, test: ast.Compare, compiler: Compiler) -> bool:
+        """
+        Cases:
+        1. z and y accesses are not contiguous (all need to be over i).
+            for k in range(Q):
+                z[i][j] += x[i][k] * y[k][j]
+        2. z and y accesses are contiguous.
+            x_ik = x[i][k]  # Cache x[i][k] for inner loop use
+            for j in range(R):
+                z[i][j] += x_ik * y[k][j]
+        3. Only  +, *, =, += are supported.
+        """
+        assert isinstance(node, ast.AugAssign) or isinstance(
+            node, ast.Assign), "only AugAssign and Assign supported"
+        try:
+            simd_visitor = SIMDVisitor(test.left)
+            simd_visitor.visit(node)
+            return True
+        except Exception as e:
+            # If SIMDVisitor raises an exception, the code is not valid for SIMD
+            return False
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -1592,4 +1892,5 @@ if __name__ == '__main__':
         source = f.read()
     node = ast.parse(source, filename=args.filename)
     compiler = Compiler(optimize=True)
+    # compiler.disable_simd = True
     compiler.compile(node)
